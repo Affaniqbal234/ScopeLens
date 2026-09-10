@@ -1,4 +1,5 @@
 from importlib.metadata import version
+from pathlib import Path
 
 import pytest
 
@@ -34,7 +35,7 @@ def test_version_matches_installed_package(capsys: pytest.CaptureFixture[str]) -
     assert output.err == ""
 
 
-@pytest.mark.parametrize("argument", ["scan", "--unknown", "--ver"])
+@pytest.mark.parametrize("argument", ["--unknown", "--ver"])
 def test_unsupported_arguments_fail(
     argument: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -45,3 +46,38 @@ def test_unsupported_arguments_fail(
     output = capsys.readouterr()
     assert output.out == ""
     assert "unrecognized arguments" in output.err
+
+
+def test_scanner_command_is_not_available(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["scan"])
+    assert exc.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
+
+
+def test_validate_config_command(
+    config_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    main(["validate-config", str(config_path)])
+    output = capsys.readouterr()
+    assert output.out == "Configuration valid for project 'local-lab'.\n"
+    assert output.err == ""
+
+
+def test_validate_config_rejects_missing_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["validate-config", str(tmp_path / "missing.toml")])
+    assert exc.value.code == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "cannot read the configuration file" in output.err
+    assert "Traceback" not in output.err
+
+
+def test_validate_config_requires_path(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["validate-config"])
+    assert exc.value.code == 2
+    assert "required" in capsys.readouterr().err

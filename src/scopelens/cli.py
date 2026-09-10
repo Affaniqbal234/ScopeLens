@@ -1,5 +1,8 @@
 import argparse
 from importlib.metadata import version
+from pathlib import Path
+
+from scopelens.config import ConfigurationError, load_config
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -11,5 +14,18 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {version('scopelens')}"
     )
-    parser.parse_args(argv)
-    parser.print_help()
+    commands = parser.add_subparsers(dest="command")
+    validate = commands.add_parser(
+        "validate-config",
+        help="validate a local scope configuration without network access",
+    )
+    validate.add_argument("path", type=Path)
+    args = parser.parse_args(argv)
+    if args.command == "validate-config":
+        try:
+            config = load_config(args.path)
+        except ConfigurationError as exc:
+            parser.error(str(exc))
+        print(f"Configuration valid for project {config.project.id!r}.")
+    else:
+        parser.print_help()

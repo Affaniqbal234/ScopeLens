@@ -3,8 +3,12 @@ name = "scopelens"
 version = "0.1.0"
 description = "Authorized security assessment tooling."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.14,<3.15"
-dependencies = []
+dependencies = [
+    "pydantic>=2.13.5,<3",
+]
 
 [project.scripts]
 scopelens = "scopelens.cli:main"
