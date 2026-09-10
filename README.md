@@ -1,8 +1,7 @@
 # ScopeLens
 
-ScopeLens defines authorized assessment scopes, scan profiles, and evidence
-contracts. Its command-line interface validates local configuration files.
-Scanning is not available yet.
+ScopeLens validates authorized assessment scopes and imports Nmap XML reports
+into structured observations with source evidence. Live scanning is not available.
 
 ## Setup
 
@@ -65,6 +64,36 @@ be authorized for every network target. Profiles allow at most 16 target entries
 and 16 distinct destination addresses, 64 TCP ports per target, 5 HTTP requests
 per second, and a 30-second request timeout. The default timeout is 10 seconds.
 These are validated settings; no requests are executed.
+
+## Nmap XML import
+
+Import an existing [Nmap XML report](https://nmap.org/book/output-formats-xml-output.html)
+and print normalized JSON:
+
+```sh
+uv run --locked scopelens import-nmap tests/fixtures/nmap/services.xml --profile-id fixture --profile-revision 1
+```
+
+Importing reads one local file without running Nmap, resolving DNS, or contacting
+targets. Profile metadata is supplied by the importer; importing does not verify
+that profile was used or grant scanning permission.
+
+Observations retain reported host and port states, service metadata, and source
+references containing the file's SHA-256 hash, XML record location, scanner and
+adapter versions, profile metadata, and timestamp. Host completion time is used
+when present, otherwise report completion time. Keep the original XML to inspect
+the referenced evidence; import does not store it.
+
+Missing metadata produces no observation. Summarized port counts remain counts,
+without assigning states to unlisted ports. Service name lookup and probe results
+remain distinct. An error exit or missing exit status is preserved in the JSON.
+
+Imports support IPv4 hosts and TCP, UDP, and SCTP ports from 1 to 65535, subject to
+the address restrictions above. Reports must include a completion timestamp.
+Malformed XML, internal DTDs, duplicate host/service records, and inputs over
+8 MiB, 32 nesting levels, or 50,000 elements are rejected. External DTDs,
+stylesheets, and XInclude references are never loaded. NSE, OS detection, and
+unrecognized XML sections are not normalized. Fixtures use synthetic lab data.
 
 ## Development
 

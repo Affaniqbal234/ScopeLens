@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from scopelens.adapters.base import ParsedReport
 from scopelens.cli import main
 
 
@@ -81,3 +82,56 @@ def test_validate_config_requires_path(capsys: pytest.CaptureFixture[str]) -> No
         main(["validate-config"])
     assert exc.value.code == 2
     assert "required" in capsys.readouterr().err
+
+
+def test_import_nmap_outputs_normalized_json(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = Path(__file__).parent / "fixtures/nmap/services.xml"
+    main(
+        ["import-nmap", str(path), "--profile-id", "fixture", "--profile-revision", "1"]
+    )
+    output = capsys.readouterr()
+    report = ParsedReport.model_validate_json(output.out)
+    assert report.evidence.profile_id == "fixture"
+    assert report.observations
+    assert output.err == ""
+
+
+@pytest.mark.parametrize(
+    "arguments", [[], ["report.xml"], ["report.xml", "--profile-id", "fixture"]]
+)
+def test_import_nmap_requires_path_and_provenance(
+    arguments: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["import-nmap", *arguments])
+    assert exc.value.code == 2
+    output = capsys.readouterr()
+    assert not output.out
+    assert "required" in output.err
+
+
+@pytest.mark.parametrize("kind", ["malformed", "missing", "invalid-profile"])
+def test_import_nmap_errors_do_not_emit_partial_json(
+    kind: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "report.xml"
+    if kind != "missing":
+        path.write_text("<nmaprun secret='DO-NOT-ECHO'", encoding="utf-8")
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "import-nmap",
+                str(path),
+                "--profile-id",
+                "DO-NOT-ECHO" if kind == "invalid-profile" else "fixture",
+                "--profile-revision",
+                "1",
+            ]
+        )
+    assert exc.value.code == 2
+    output = capsys.readouterr()
+    assert not output.out
+    assert "DO-NOT-ECHO" not in output.err
+    assert "Traceback" not in output.err

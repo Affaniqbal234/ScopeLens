@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from scopelens.domain.evidence import EvidenceReference, Observation
+from scopelens.domain.services import ServiceEndpoint
 
 
 @pytest.fixture
@@ -73,6 +74,36 @@ def test_observation_requires_source_evidence() -> None:
         Observation(
             subject="192.0.2.1", key="service.banner", value="example", evidence=()
         )
+
+
+def test_service_subject_keeps_address_transport_and_port(
+    evidence: EvidenceReference,
+) -> None:
+    subject = ServiceEndpoint(address="192.0.2.1", transport="tcp", port=443)
+    observation = Observation(
+        subject=subject, key="service.state", value="open", evidence=(evidence,)
+    )
+    assert Observation.model_validate_json(observation.model_dump_json()) == observation
+    assert subject != ServiceEndpoint(address="192.0.2.1", transport="udp", port=443)
+    assert subject != ServiceEndpoint(address="192.0.2.1", transport="tcp", port=80)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("port", 0),
+        ("port", 65536),
+        ("port", True),
+        ("port", "443"),
+        ("transport", "ip"),
+        ("address", "example.test"),
+    ],
+)
+def test_service_subject_rejects_invalid_identity(field: str, value: object) -> None:
+    data: dict[str, object] = {"address": "192.0.2.1", "transport": "tcp", "port": 443}
+    data[field] = value
+    with pytest.raises(ValidationError):
+        ServiceEndpoint.model_validate(data)
 
 
 @pytest.mark.parametrize(

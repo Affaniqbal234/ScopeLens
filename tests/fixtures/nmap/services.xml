@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<?xml-stylesheet href="file:///unused/nmap.xsl" type="text/xsl"?>
+<!-- Synthetic report using documentation addresses and reserved example names. -->
+<nmaprun scanner="nmap" version="7.95" xmloutputversion="1.05" start="1700000000">
+  <scaninfo type="connect" protocol="tcp" numservices="8" services="22,25,80,81,82,83,443,8000"/>
+  <verbose level="0"/>
+  <debugging level="0"/>
+  <host starttime="1700000000" endtime="1700000005" timedout="false">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.0.2.10" addrtype="ipv4"/>
+    <address addr="02:00:00:00:00:10" addrtype="mac"/>
+    <hostnames><hostname name="lab.example.test" type="PTR"/></hostnames>
+    <ports>
+      <extraports state="closed" count="2"><extrareasons reason="conn-refused" count="2"/></extraports>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="64"/>
+        <service name="ssh" product="Example SSH" version="1.2" extrainfo="lab only" method="probed" conf="10">
+          <cpe>cpe:/a:example:ssh:1.2</cpe>
+        </service>
+      </port>
+      <port protocol="tcp" portid="25">
+        <state state="closed" reason="conn-refused" reason_ttl="0"/>
+        <service name="smtp" method="table" conf="3"/>
+      </port>
+      <port protocol="tcp" portid="80"><state state="filtered" reason="no-response" reason_ttl="0"/></port>
+      <port protocol="tcp" portid="81"><state state="unfiltered" reason="reset" reason_ttl="64"/></port>
+      <port protocol="tcp" portid="82"><state state="open|filtered" reason="no-response" reason_ttl="0"/></port>
+      <port protocol="tcp" portid="83"><state state="closed|filtered" reason="no-response" reason_ttl="0"/></port>
+    </ports>
+  </host>
+  <host>
+    <status state="down" reason="no-response" reason_ttl="0"/>
+    <address addr="192.0.2.11" addrtype="ipv4"/>
+  </host>
+  <runstats>
+    <finished time="1700000010" elapsed="10" exit="success"/>
+    <hosts up="1" down="1" total="2"/>
+  </runstats>
+</nmaprun>

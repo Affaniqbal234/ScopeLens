@@ -2,6 +2,7 @@ from typing import Annotated
 
 from pydantic import AwareDatetime, Field, StrictBool, StrictInt, StrictStr
 
+from scopelens.domain.services import ServiceEndpoint
 from scopelens.domain.targets import DomainModel, Identifier, TargetIdentity
 
 Text = Annotated[str, Field(strict=True, min_length=1, max_length=1024, pattern=r"\S")]
@@ -27,7 +28,7 @@ class EvidenceReference(DomainModel):
 
 
 class Observation(DomainModel):
-    subject: TargetIdentity
+    subject: TargetIdentity | ServiceEndpoint
     key: Annotated[
         str,
         Field(
