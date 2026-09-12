@@ -1,0 +1,57 @@
+services:
+  target:
+    build:
+      context: ..
+      dockerfile: lab/Dockerfile
+      target: target
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 32
+    mem_limit: 64m
+    cpus: 0.5
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    networks:
+      lab:
+        ipv4_address: 172.30.255.2
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=2).close()"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    logging:
+      driver: local
+      options: {max-size: 1m, max-file: "1", compress: "false"}
+  scanner:
+    profiles: [scan]
+    build:
+      context: ..
+      dockerfile: lab/Dockerfile
+      target: scanner
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 1
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    volumes: [artifacts:/artifacts]
+    networks:
+      lab:
+        ipv4_address: 172.30.255.3
+    depends_on:
+      target:
+        condition: service_healthy
+    logging:
+      driver: local
+      options: {max-size: 1m, max-file: "1", compress: "false"}
+networks:
+  lab:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.255.0/28
+volumes:
+  artifacts:

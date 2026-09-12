@@ -1,0 +1,2 @@
+ScopeLens controlled lab fixture
+This deliberately exposed sample file contains no credentials or real data.

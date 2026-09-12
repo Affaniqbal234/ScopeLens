@@ -1,10 +1,13 @@
 from importlib.metadata import version
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
+import scopelens.cli as cli
 from scopelens.adapters.base import ParsedReport
 from scopelens.cli import main
+from scopelens.execution.process import ExecutionError
 
 
 def test_no_arguments_shows_help(capsys: pytest.CaptureFixture[str]) -> None:
@@ -14,6 +17,32 @@ def test_no_arguments_shows_help(capsys: pytest.CaptureFixture[str]) -> None:
     assert "usage: scopelens" in output.out
     assert "--version" in output.out
     assert output.err == ""
+
+
+def test_scan_requires_config_and_profile(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["scan-nmap"])
+    assert exc.value.code == 2
+    assert "required" in capsys.readouterr().err
+
+
+def test_scan_failure_does_not_print_partial_json(
+    config_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scanner = AsyncMock(
+        side_effect=ExecutionError("scanner timed out", Path("private/run"))
+    )
+    monkeypatch.setattr(cli, "scan_nmap", scanner)
+    with pytest.raises(SystemExit) as exc:
+        main(["scan-nmap", str(config_path), "--profile", "conservative"])
+    assert exc.value.code == 2
+    output = capsys.readouterr()
+    assert not output.out
+    assert "timed out" in output.err
+    assert "private artifacts" in output.err
+    assert "Traceback" not in output.err
 
 
 def test_help_exits_successfully(capsys: pytest.CaptureFixture[str]) -> None:

@@ -104,3 +104,8 @@ class ScanProfile(DomainModel):
     max_targets: Annotated[int, Field(strict=True, ge=1, le=16)] = 16
     requests_per_second: Annotated[int, Field(strict=True, ge=1, le=5)] = 5
     request_timeout_seconds: Annotated[int, Field(strict=True, ge=1, le=30)] = 10
+    scan_timeout_seconds: Annotated[int, Field(strict=True, ge=1, le=120)] = 30
+    probes_per_second: Annotated[int, Field(strict=True, ge=1, le=5)] = 5
+    max_artifact_bytes: Annotated[
+        int, Field(strict=True, ge=1024, le=8 * 1024 * 1024)
+    ] = 1024 * 1024

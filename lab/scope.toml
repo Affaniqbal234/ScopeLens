@@ -1,0 +1,15 @@
+[project]
+id = "controlled-lab"
+name = "Controlled lab"
+
+[[project.scope.network_targets]]
+address = "172.30.255.2"
+ports = [8000, 8001]
+
+[[profiles]]
+id = "lab"
+tcp_ports = [8000, 8001]
+max_targets = 1
+scan_timeout_seconds = 30
+probes_per_second = 5
+max_artifact_bytes = 1048576
