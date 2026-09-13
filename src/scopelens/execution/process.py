@@ -29,7 +29,7 @@ def require_linux() -> None:
         )
 
 
-def _private_directory(root: Path) -> Path:
+def _private_directory(root: Path, prefix: str = "nmap-") -> Path:
     try:
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         info = root.lstat()
@@ -44,7 +44,7 @@ def _private_directory(root: Path) -> Path:
             "artifact root must be an owned, private directory (mode 0700)"
         )
     try:
-        return Path(tempfile.mkdtemp(prefix="nmap-", dir=root))
+        return Path(tempfile.mkdtemp(prefix=prefix, dir=root))
     except OSError:
         raise ExecutionError("cannot allocate a private run directory") from None
 
@@ -78,16 +78,29 @@ async def _stop(process: asyncio.subprocess.Process) -> None:
 
 
 async def run_process(
-    argv: tuple[str, ...], artifact_root: Path, *, timeout: float, output_limit: int
+    argv: tuple[str, ...],
+    artifact_root: Path,
+    *,
+    timeout: float,
+    output_limit: int,
+    scanner: str = "nmap",
 ) -> RawArtifacts:
     require_linux()
     if not argv or not Path(argv[0]).is_absolute():
         raise ExecutionError("scanner executable must use an absolute path")
     if not 0 < timeout <= 120 or not 0 < output_limit <= 8 * 1024 * 1024:
         raise ExecutionError("invalid process limits")
-    directory = _private_directory(artifact_root.absolute())
+    if scanner not in ("nmap", "httpx"):
+        raise ExecutionError("unsupported scanner process")
+    directory = (
+        _private_directory(artifact_root.absolute())
+        if scanner == "nmap"
+        else _private_directory(artifact_root.absolute(), "httpx-")
+    )
     artifacts = RawArtifacts(
-        directory, directory / "stdout.xml", directory / "stderr.txt"
+        directory,
+        directory / ("stdout.xml" if scanner == "nmap" else "stdout.jsonl"),
+        directory / "stderr.txt",
     )
     used = 0
     stderr_used = 0

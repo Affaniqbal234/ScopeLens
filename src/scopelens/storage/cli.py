@@ -10,7 +10,8 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from scopelens.adapters.base import ReportParseError
 from scopelens.config import ConfigurationError, load_config
-from scopelens.domain.scope import ScopeViolation
+from scopelens.domain.scope import ScopeViolation, WebTarget
+from scopelens.execution.httpx import HTTPX_EXECUTABLE
 from scopelens.execution.process import ExecutionError
 from scopelens.storage.artifacts import ArtifactError, ArtifactStore
 from scopelens.storage.database import HistoryError, database, migrate
@@ -35,12 +36,32 @@ def run_history(args: argparse.Namespace, parser: argparse.ArgumentParser) -> No
         if args.command in ("history-import", "history-scan"):
             print(f"Run ID: {args.run_id}", file=sys.stderr)
             config = load_config(args.config)
+            target = (
+                WebTarget(origin=args.origin, approved_addresses=(args.address,))
+                if args.origin or args.address
+                else None
+            )
             if args.command == "history-import":
                 report = import_history(
-                    history, config, args.profile, args.run_id, args.path
+                    history,
+                    config,
+                    args.profile,
+                    args.run_id,
+                    args.path,
+                    scanner=args.scanner,
+                    web_target=target,
+                    scanner_version=args.scanner_version,
                 )
             else:
-                report = scan_history(history, config, args.profile, args.run_id)
+                report = scan_history(
+                    history,
+                    config,
+                    args.profile,
+                    args.run_id,
+                    scanner=args.scanner,
+                    web_target=target,
+                    binary=args.httpx_binary,
+                )
             print(report.model_dump_json(indent=2))
         elif args.command == "history-list":
             print(json.dumps(history.list_runs(args.project), default=str, indent=2))
@@ -76,8 +97,8 @@ def run_history(args: argparse.Namespace, parser: argparse.ArgumentParser) -> No
 def add_commands(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     for name, help_text in (
         ("history-init", "apply PostgreSQL history migrations"),
-        ("history-import", "persist an authorized offline Nmap XML import"),
-        ("history-scan", "run Nmap with persistent history on Linux"),
+        ("history-import", "persist an authorized scanner report"),
+        ("history-scan", "run a scanner with persistent history on Linux"),
         ("history-list", "list a project's persisted runs"),
         ("history-show", "read a persisted normalized report"),
         (
@@ -93,8 +114,14 @@ def add_commands(commands: argparse._SubParsersAction[argparse.ArgumentParser]) 
             command.add_argument("config", type=Path)
             command.add_argument("--profile", required=True)
             command.add_argument("--run-id", type=UUID, required=True)
+            command.add_argument("--scanner", choices=("nmap", "httpx"), default="nmap")
+            command.add_argument("--origin")
+            command.add_argument("--address")
         if name == "history-import":
             command.add_argument("path", type=Path)
+            command.add_argument("--scanner-version")
+        if name == "history-scan":
+            command.add_argument("--httpx-binary", default=HTTPX_EXECUTABLE)
         if name == "history-list":
             command.add_argument("--project", required=True)
         if name == "history-show":

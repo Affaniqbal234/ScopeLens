@@ -8,8 +8,11 @@ from uuid import UUID
 from sqlalchemy import Connection, select
 
 from scopelens.adapters.base import ParsedReport, ReportParseError
+from scopelens.adapters.httpx import HTTPX_VERSION
 from scopelens.config import ProjectConfig
-from scopelens.domain.scope import ScopeViolation
+from scopelens.domain.scope import ScopeViolation, WebTarget
+from scopelens.execution.httpx import HTTPX_EXECUTABLE, scan_httpx
+from scopelens.execution.httpx import build_command as httpx_command
 from scopelens.execution.nmap import build_command, scan_nmap
 from scopelens.execution.process import ExecutionError
 from scopelens.storage import schema as s
@@ -30,11 +33,28 @@ def read_input(path: Path, limit: int = MAX_ARTIFACT_BYTES) -> bytes:
 
 
 def import_history(
-    history: History, config: ProjectConfig, profile: str, run_id: UUID, path: Path
+    history: History,
+    config: ProjectConfig,
+    profile: str,
+    run_id: UUID,
+    path: Path,
+    *,
+    scanner: str = "nmap",
+    web_target: WebTarget | None = None,
+    scanner_version: str | None = None,
 ) -> ParsedReport:
     raw = read_input(path)
     with locked_run(history.engine, run_id) as connection:
-        history.begin(connection, run_id, config, profile, kind="import")
+        history.begin(
+            connection,
+            run_id,
+            config,
+            profile,
+            kind="import",
+            scanner=scanner,
+            web_target=web_target,
+            scanner_version=scanner_version,
+        )
         try:
             return history.ingest(connection, run_id, raw)
         except ReportParseError, ScopeViolation:
@@ -50,9 +70,21 @@ def _failure(
 
 
 def scan_history(
-    history: History, config: ProjectConfig, profile: str, run_id: UUID
+    history: History,
+    config: ProjectConfig,
+    profile: str,
+    run_id: UUID,
+    *,
+    scanner: str = "nmap",
+    web_target: WebTarget | None = None,
+    binary: str = HTTPX_EXECUTABLE,
 ) -> ParsedReport:
-    build_command(config, profile)
+    if scanner == "nmap":
+        build_command(config, profile)
+    elif scanner == "httpx" and web_target is not None:
+        httpx_command(config, profile, web_target, binary)
+    else:
+        raise HistoryError("invalid scanner target")
     with locked_run(history.engine, run_id) as connection:
         # A scan attempt is never restarted by reusing its ID.
         exists = connection.scalar(select(s.runs.c.id).where(s.runs.c.id == run_id))
@@ -61,10 +93,25 @@ def scan_history(
             raise HistoryError(
                 "scan identifier already exists; use history-show or a new ID"
             )
-        history.begin(connection, run_id, config, profile, kind="scan")
+        history.begin(
+            connection,
+            run_id,
+            config,
+            profile,
+            kind="scan",
+            scanner=scanner,
+            web_target=web_target,
+            scanner_version=HTTPX_VERSION if scanner == "httpx" else None,
+        )
         directory = history.artifacts.directory(run_id)
         try:
-            result = asyncio.run(scan_nmap(config, profile, directory))
+            if scanner == "nmap":
+                result = asyncio.run(scan_nmap(config, profile, directory))
+            else:
+                assert web_target is not None
+                result = asyncio.run(
+                    scan_httpx(config, profile, directory, web_target, binary)
+                )
         except KeyboardInterrupt:
             _failure(history, connection, run_id, "interrupted", "cancelled")
             raise

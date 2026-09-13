@@ -80,7 +80,7 @@ def test_fresh_migration_and_repeat(engine: Engine) -> None:
     with engine.connect() as connection:
         assert (
             connection.scalar(text("SELECT version_num FROM alembic_version"))
-            == "0001_scan_history"
+            == "0002_httpx"
         )
         assert (
             compare_metadata(MigrationContext.configure(connection), s.metadata) == []
@@ -483,7 +483,52 @@ def test_migration_downgrade_in_disposable_schema(engine: Engine) -> None:
         connection.execute(text(f'CREATE SCHEMA "{name}"'))
         connection.execute(text(f'SET LOCAL search_path TO "{name}"'))
         config.attributes["connection"] = connection
+        command.upgrade(config, "0001_scan_history")
+        run_id = uuid4()
+        connection.execute(insert(s.projects).values(id="legacy", name="Legacy"))
+        connection.execute(
+            insert(s.scope_snapshots).values(id="a" * 64, project_id="legacy", scope={})
+        )
+        connection.execute(
+            insert(s.runs).values(
+                id=run_id,
+                project_id="legacy",
+                scope_snapshot_id="a" * 64,
+                kind="import",
+                profile={},
+                profile_revision="b" * 64,
+                status="running",
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO stages (id, run_id, project_id, scanner, status) VALUES (:id, :id, 'legacy', 'nmap', 'running')"
+            ),
+            {"id": run_id},
+        )
         command.upgrade(config, "head")
+        row = (
+            connection.execute(select(s.stages).where(s.stages.c.id == run_id))
+            .mappings()
+            .one()
+        )
+        assert (
+            row["scanner"] == "nmap"
+            and row["input_context"] == {}
+            and row["status"] == "running"
+        )
+        connection.execute(
+            update(s.stages).where(s.stages.c.id == run_id).values(scanner="httpx")
+        )
+        with pytest.raises(RuntimeError, match="httpx history exists"):
+            command.downgrade(config, "0001_scan_history")
+        assert (
+            connection.scalar(text("SELECT version_num FROM alembic_version"))
+            == "0002_httpx"
+        )
+        connection.execute(
+            update(s.stages).where(s.stages.c.id == run_id).values(scanner="nmap")
+        )
         assert set(inspect(connection).get_table_names(schema=name)) == set(
             s.metadata.tables
         ) | {"alembic_version"}
@@ -492,7 +537,358 @@ def test_migration_downgrade_in_disposable_schema(engine: Engine) -> None:
         command.upgrade(config, "head")
         assert (
             connection.scalar(text("SELECT version_num FROM alembic_version"))
-            == "0001_scan_history"
+            == "0002_httpx"
         )
         # This generated schema exists only in this test-owned database.
         connection.execute(text(f'DROP SCHEMA "{name}" CASCADE'))
+
+
+def test_httpx_history_identity_idempotency_and_reopen(
+    history: History, tmp_path: Path
+) -> None:
+    import json
+
+    from scopelens.adapters.httpx import HTTPX_VERSION
+    from scopelens.domain.scope import WebTarget
+    from scopelens.domain.services import HttpEndpoint
+    from tests.test_httpx import RAW, TARGET, web_config
+
+    config = web_config()
+    data = config.model_dump(mode="json")
+    data["project"]["id"] = "httpx-" + uuid4().hex
+    data["project"]["scope"]["web_targets"].append(
+        {"origin": "http://site.invalid:8443", "approved_addresses": ["127.0.0.1"]}
+    )
+    config = ProjectConfig.model_validate(data)
+    path = tmp_path / "report.jsonl"
+    path.write_bytes(RAW)
+    run_id = uuid4()
+    expected = import_history(
+        history,
+        config,
+        "web",
+        run_id,
+        path,
+        scanner="httpx",
+        web_target=TARGET,
+        scanner_version=HTTPX_VERSION,
+    )
+    before = counts(history.engine)
+    assert (
+        import_history(
+            history,
+            config,
+            "web",
+            run_id,
+            path,
+            scanner="httpx",
+            web_target=TARGET,
+            scanner_version=HTTPX_VERSION,
+        )
+        == expected
+    )
+    assert counts(history.engine) == before
+    assert (
+        History(history.engine, ArtifactStore(history.artifacts.root)).report(run_id)
+        == expected
+    )
+    assert history.artifacts.read(f"{run_id}/stdout.jsonl") == RAW
+    with history.engine.connect() as connection:
+        assert (
+            connection.scalar(
+                select(func.count())
+                .select_from(s.evidence)
+                .where(s.evidence.c.stage_id == run_id)
+            )
+            == 2
+        )
+        assert (
+            connection.scalar(
+                select(s.entities.c.kind).where(
+                    s.entities.c.project_id == config.project.id
+                )
+            )
+            == "origin"
+        )
+    assert all(isinstance(item.subject, HttpEndpoint) for item in expected.observations)
+    other = WebTarget(
+        origin="http://site.invalid:8443", approved_addresses=("127.0.0.1",)
+    )
+    with pytest.raises(HistoryError, match="different scanner input"):
+        import_history(
+            history,
+            config,
+            "web",
+            run_id,
+            path,
+            scanner="httpx",
+            web_target=other,
+            scanner_version=HTTPX_VERSION,
+        )
+    record = json.loads(RAW)
+    record["url"] = "http://127.0.0.1:8443"
+    path.write_text(json.dumps(record), encoding="utf-8")
+    import_history(
+        history,
+        config,
+        "web",
+        uuid4(),
+        path,
+        scanner="httpx",
+        web_target=other,
+        scanner_version=HTTPX_VERSION,
+    )
+    assert counts(history.engine)["entities"] == before["entities"] + 1
+    (history.artifacts.root / str(run_id) / "stdout.jsonl").write_bytes(b"corrupt")
+    assert {
+        "run_id": str(run_id),
+        "issue": "corrupt",
+        "path": f"{run_id}/stdout.jsonl",
+    } in history.reconcile()
+
+
+def test_httpx_publication_failure_retries_without_duplicate_evidence(
+    history: History, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scopelens.adapters.httpx import HTTPX_VERSION
+    from tests.test_httpx import RAW, TARGET, web_config
+
+    config = web_config()
+    path = tmp_path / "report.jsonl"
+    path.write_bytes(RAW)
+    run_id = uuid4()
+
+    def fail(*_: object) -> None:
+        raise RuntimeError("write interrupted")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(history, "_finish", fail)
+        with pytest.raises(RuntimeError, match="write interrupted"):
+            import_history(
+                history,
+                config,
+                "web",
+                run_id,
+                path,
+                scanner="httpx",
+                web_target=TARGET,
+                scanner_version=HTTPX_VERSION,
+            )
+    assert history.artifacts.read(f"{run_id}/stdout.jsonl") == RAW
+    with history.engine.connect() as connection:
+        assert (
+            connection.scalar(
+                select(func.count())
+                .select_from(s.evidence)
+                .where(s.evidence.c.stage_id == run_id)
+            )
+            == 0
+        )
+    result = import_history(
+        history,
+        config,
+        "web",
+        run_id,
+        path,
+        scanner="httpx",
+        web_target=TARGET,
+        scanner_version=HTTPX_VERSION,
+    )
+    assert history.report(run_id) == result
+
+
+@pytest.mark.parametrize("case", ["partial", "duplicate", "scope"])
+def test_httpx_invalid_import_publishes_nothing(
+    history: History, tmp_path: Path, case: str
+) -> None:
+    from scopelens.adapters.base import ReportParseError
+    from scopelens.adapters.httpx import HTTPX_VERSION
+    from tests.test_httpx import RAW, TARGET, web_config
+
+    raw = {
+        "partial": RAW + b'{"partial":',
+        "duplicate": RAW + RAW,
+        "scope": RAW.replace(b"127.0.0.1", b"192.0.2.1"),
+    }[case]
+    path = tmp_path / "invalid.jsonl"
+    path.write_bytes(raw)
+    run_id = uuid4()
+    with pytest.raises(ReportParseError):
+        import_history(
+            history,
+            web_config(),
+            "web",
+            run_id,
+            path,
+            scanner="httpx",
+            web_target=TARGET,
+            scanner_version=HTTPX_VERSION,
+        )
+    assert not (history.artifacts.root / str(run_id)).exists()
+    with history.engine.connect() as connection:
+        assert (
+            connection.scalar(select(s.runs.c.status).where(s.runs.c.id == run_id))
+            == "failed"
+        )
+
+
+def test_httpx_history_cli(
+    history: History,
+    config_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    postgres: DisposablePostgres,
+) -> None:
+    from scopelens.adapters.base import ParsedReport
+    from scopelens.cli import main
+    from tests.test_httpx import RAW
+
+    monkeypatch.setenv("SCOPELENS_DATABASE_URL", postgres.url)
+    path = tmp_path / "cli.jsonl"
+    path.write_bytes(RAW.replace(b"https://127.0.0.1:8443", b"http://127.0.0.1:8000"))
+    run_id = uuid4()
+    main(
+        [
+            "history-import",
+            str(config_path),
+            str(path),
+            "--profile",
+            "conservative",
+            "--run-id",
+            str(run_id),
+            "--scanner",
+            "httpx",
+            "--origin",
+            "http://localhost:8000",
+            "--address",
+            "127.0.0.1",
+            "--scanner-version",
+            "1.12.0",
+            "--artifacts",
+            str(history.artifacts.root),
+        ]
+    )
+    report = ParsedReport.model_validate_json(capsys.readouterr().out)
+    assert history.report(run_id) == report
+    assert report.evidence.scanner == "httpx"
+
+
+def test_httpx_scan_dispatch_and_lock(
+    history: History, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scopelens.adapters.base import ImportContext
+    from scopelens.adapters.httpx import HttpxAdapter
+    from scopelens.domain.scope import WebTarget
+    from scopelens.execution.base import ScanResult
+    from scopelens.execution.process import RawArtifacts
+    from scopelens.storage import operations
+    from tests.test_httpx import RAW, TARGET, web_config
+
+    run_id = uuid4()
+
+    async def scanner(
+        config: ProjectConfig, profile: str, root: Path, target: WebTarget, binary: str
+    ) -> ScanResult:
+        assert target == TARGET and binary == "/trusted/httpx"
+        with history.engine.connect() as connection:
+            assert connection.scalars(
+                text(
+                    "SELECT state FROM pg_stat_activity WHERE pid IN (SELECT pid FROM pg_locks WHERE locktype='advisory') AND pid <> pg_backend_pid() AND datname=current_database()"
+                )
+            ).all() == ["idle"]
+        capture = root / "httpx-capture"
+        capture.mkdir(mode=0o700)
+        stdout, stderr = capture / "stdout.jsonl", capture / "stderr.txt"
+        stdout.write_bytes(RAW)
+        stderr.write_bytes(b"")
+        return ScanResult(
+            RawArtifacts(capture, stdout, stderr),
+            HttpxAdapter().parse(
+                RAW,
+                ImportContext(
+                    profile_id=profile,
+                    profile_revision="test",
+                    scanner_version="1.12.0",
+                    web_target=target,
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(operations, "scan_httpx", scanner)
+    result = operations.scan_history(
+        history,
+        web_config(),
+        "web",
+        run_id,
+        scanner="httpx",
+        web_target=TARGET,
+        binary="/trusted/httpx",
+    )
+    assert history.report(run_id) == result
+    assert sorted(p.name for p in history.artifacts.directory(run_id).iterdir()) == [
+        "stderr.txt",
+        "stdout.jsonl",
+    ]
+
+
+@pytest.mark.skipif(
+    not os.environ.get("SCOPELENS_HTTPX_BINARY"),
+    reason="requires explicit httpx v1.12.0 binary",
+)
+def test_httpx_history_real_scan_cli(
+    history: History,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    postgres: DisposablePostgres,
+) -> None:
+    from scopelens.adapters.base import ParsedReport
+    from scopelens.cli import main
+    from tests.test_httpx_linux import server
+
+    requests: list[tuple[str | None, str]] = []
+    run_id = uuid4()
+    monkeypatch.setenv("SCOPELENS_DATABASE_URL", postgres.url)
+    with server(requests) as source:
+        origin = f"http://site.invalid:{source.server_port}"
+        config_path = tmp_path / "web.toml"
+        config_path.write_text(
+            f'''[project]
+id = "httpx-live"
+name = "Local HTTP"
+[[project.scope.web_targets]]
+origin = "{origin}"
+approved_addresses = ["127.0.0.1"]
+[[profiles]]
+id = "web"
+''',
+            encoding="utf-8",
+        )
+        main(
+            [
+                "history-scan",
+                str(config_path),
+                "--profile",
+                "web",
+                "--run-id",
+                str(run_id),
+                "--scanner",
+                "httpx",
+                "--origin",
+                origin,
+                "--address",
+                "127.0.0.1",
+                "--httpx-binary",
+                os.environ["SCOPELENS_HTTPX_BINARY"],
+                "--artifacts",
+                str(history.artifacts.root),
+            ]
+        )
+    report = ParsedReport.model_validate_json(capsys.readouterr().out)
+    assert history.report(run_id) == report
+    assert requests == [(f"site.invalid:{source.server_port}", "/")]
+    assert history.artifacts.read(f"{run_id}/stdout.jsonl")
+    assert not [
+        item for item in history.reconcile() if item.get("run_id") == str(run_id)
+    ]

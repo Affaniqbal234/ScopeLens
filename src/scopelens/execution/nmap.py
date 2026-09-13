@@ -1,21 +1,15 @@
-from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 
-from scopelens.adapters.base import ImportContext, ParsedReport, ReportParseError
+from scopelens.adapters.base import ImportContext, ReportParseError
 from scopelens.adapters.nmap import import_nmap
 from scopelens.config import ProjectConfig
 from scopelens.domain.scope import NetworkTarget, ScopeViolation
 from scopelens.domain.services import ServiceEndpoint
-from scopelens.execution.process import ExecutionError, RawArtifacts, run_process
+from scopelens.execution.base import ScanResult as ScanResult
+from scopelens.execution.process import ExecutionError, run_process
 
 NMAP_EXECUTABLE = "/usr/bin/nmap"
-
-
-@dataclass(frozen=True)
-class ScanResult:
-    artifacts: RawArtifacts
-    report: ParsedReport
 
 
 def build_command(config: ProjectConfig, profile_id: str) -> tuple[str, ...]:

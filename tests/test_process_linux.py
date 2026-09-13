@@ -36,8 +36,13 @@ def test_real_process_and_private_artifacts(tmp_path: Path) -> None:
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+@pytest.mark.parametrize("scanner", ["nmap", "httpx"])
 @pytest.mark.parametrize("mode", ["timeout", "overflow", "cancel", "descendant"])
-def test_real_cleanup_is_bounded_under_pipe_pressure(tmp_path: Path, mode: str) -> None:
+def test_real_cleanup_is_bounded_under_pipe_pressure(
+    tmp_path: Path, mode: str, scanner: str
+) -> None:
+    filename = "stdout.xml" if scanner == "nmap" else "stdout.jsonl"
+
     async def scenario() -> None:
         code = """
 import os, signal, sys, time
@@ -59,6 +64,7 @@ else:
             run_process(
                 (sys.executable, "-c", code, mode),
                 tmp_path / "private",
+                scanner=scanner,
                 timeout=2 if mode == "cancel" else 0.3,
                 output_limit=1024 if mode == "overflow" else 8 * 1024 * 1024,
             )
@@ -66,7 +72,7 @@ else:
         if mode == "cancel":
             # Wait for launch, then cancel with output still arriving.
             for _ in range(100):
-                paths = list((tmp_path / "private").glob("*/stdout.xml"))
+                paths = list((tmp_path / "private").glob(f"*/{filename}"))
                 if paths and paths[0].stat().st_size:
                     break
                 await asyncio.sleep(0.001)
@@ -76,7 +82,7 @@ else:
         else:
             with pytest.raises(ExecutionError):
                 await asyncio.wait_for(task, 5)
-        raw = next((tmp_path / "private").glob("*/stdout.xml")).read_bytes()
+        raw = next((tmp_path / "private").glob(f"*/{filename}")).read_bytes()
         files = list((tmp_path / "private").glob("*/*"))
         assert sum(path.stat().st_size for path in files) <= (
             1024 if mode == "overflow" else 8 * 1024 * 1024

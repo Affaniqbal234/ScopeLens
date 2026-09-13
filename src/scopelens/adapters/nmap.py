@@ -90,6 +90,10 @@ def _integer(value: str | None, *, maximum: int) -> int:
 
 
 class NmapAdapter:
+    name = "nmap"
+    artifact_name = "stdout.xml"
+    root_locator = "/nmaprun"
+
     def parse(self, raw: bytes, context: ImportContext) -> ParsedReport:
         root = _xml_root(raw)
         try:

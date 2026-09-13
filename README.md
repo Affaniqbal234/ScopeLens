@@ -1,7 +1,7 @@
 # ScopeLens
 
-ScopeLens validates authorized assessment scopes, runs bounded TCP scans on Linux,
-and imports Nmap XML into structured observations with source evidence.
+ScopeLens validates authorized assessment scopes, runs bounded Nmap and httpx probes
+on Linux, and stores normalized observations with source evidence in PostgreSQL.
 
 ## Setup
 
@@ -15,7 +15,7 @@ uv run --locked scopelens --version
 ```
 
 The package also supports `uv run --locked python -m scopelens --help`.
-Offline validation and XML import work without Docker or Nmap.
+Offline validation and report parsing work without Docker or scanner binaries.
 
 ## Scope configuration
 
@@ -51,7 +51,8 @@ or permission to test.
 Network permission covers an exact IPv4 address and explicit TCP ports. Web
 permission covers an exact HTTP(S) origin and its approved destination addresses.
 Neither grants the other. Scope checks require every supplied DNS answer to be
-approved, but do not pin DNS or enforce network traffic.
+approved. Live httpx execution pins one supplied approved address without resolving
+the origin hostname.
 
 Origins use ASCII hostnames or IPv4 addresses. Hostnames are lowercased and default
 ports are omitted. Credentials, paths other than `/`, queries, fragments,
@@ -63,7 +64,7 @@ Each profile is checked against the entire configured scope. Its TCP ports must
 be authorized for every network target. Profiles allow at most 16 target entries
 and 16 distinct destination addresses, 64 TCP ports per target, 5 HTTP requests
 per second, and a 30-second request timeout. The default timeout is 10 seconds.
-HTTP settings are reserved for web scanners. Nmap uses `probes_per_second` (1–5,
+httpx uses the HTTP request settings. Nmap uses `probes_per_second` (1–5,
 default 5), `scan_timeout_seconds` (1–120, default 30), and `max_artifact_bytes`
 (1 KiB–8 MiB, default 1 MiB).
 
@@ -99,7 +100,7 @@ unrecognized XML sections are not normalized. Fixtures use synthetic lab data.
 
 ## Controlled execution
 
-Live scanning requires Linux with `/usr/bin/nmap`. On Windows, use a Linux
+Live Nmap scanning requires Linux with `/usr/bin/nmap`. On Windows, use a Linux
 distribution under WSL2 or Docker with Linux containers. Run from the Linux
 filesystem so private artifact permissions can be enforced.
 
@@ -118,12 +119,44 @@ kills the process group, with a separate cleanup deadline. Ctrl+C cancels the ru
 Output is parsed only after a successful process exit, then checked for scope and
 coverage. Missing ports, missing hosts, and timeout reports are failures.
 
-Raw XML and stderr are retained in unique directories under `.scopelens/artifacts/`
+Raw XML/JSONL and stderr are retained in unique directories under `.scopelens/artifacts/`
 (ignored by Git). Directories use mode 0700 and files use 0600. Each run limits
 combined output to `max_artifact_bytes`, with stderr additionally capped at 64 KiB.
 Failed runs retain bounded partial files. No total retention quota is applied;
 remove old run directories when they are no longer needed. An alternative
 `--artifacts` root must be private and owned by the current Linux user.
+
+## HTTP discovery
+
+Use [ProjectDiscovery httpx v1.12.0](https://github.com/projectdiscovery/httpx/releases/tag/v1.12.0),
+not the Python HTTP client with the same name. Install the verified Linux release
+at `/usr/local/bin/httpx`, or pass its absolute path with `--httpx-binary`.
+ScopeLens checks the binary's reported identity and version before probing.
+
+```sh
+uv run --locked scopelens scan-httpx scope.local.toml --profile conservative --origin http://localhost:8000 --address 127.0.0.1
+uv run --locked scopelens import-httpx report.jsonl --origin http://localhost:8000 --address 127.0.0.1 --scanner-version 1.12.0 --profile-id conservative --profile-revision 1
+```
+
+Each invocation probes `/` on one approved origin and one approved IPv4 address,
+with the origin's Host header and TLS SNI. Redirects and HTTP/HTTPS fallback are
+disabled. Redirect locations remain evidence and never grant permission to scan.
+No crawling, screenshots, or secondary-domain probes are enabled. Requests use the
+selected profile's time and output limits; response bodies are read up to 64 KiB
+and omitted from raw JSONL. Like httpx, these probes accept untrusted TLS
+certificates; a successful response does not establish certificate validity.
+
+The parser records response status, optional title, technology labels, selected
+headers, and probe failures. Missing fields remain absent. A failed probe is not
+proof that a port is closed; a technology label is not a vulnerability finding.
+HTTP endpoints retain their origin identity separately from IP/transport/port
+services. Raw headers can contain sensitive data and remain private.
+
+Imports require the declared scanner version and origin/address context because
+JSONL alone does not establish either the tool version or the original virtual
+host. They never contact targets. Malformed, duplicate, partial, or out-of-scope
+records reject the whole import. JSONL has no completion marker; live execution
+also requires a successful process exit and evidence for the selected address.
 
 ## Controlled lab
 
@@ -150,7 +183,7 @@ Keep this intentionally exposed fixture isolated.
 ## Persistent history
 
 History uses PostgreSQL for projects, scope/profile snapshots, runs, stable entity
-identities, observations, and evidence metadata. Raw XML and stderr stay on a
+identities, observations, and evidence metadata. Raw XML/JSONL and stderr stay on a
 private Linux filesystem. Offline imports remain distinct from executed scans.
 
 Use a dedicated PostgreSQL database with a direct connection; transaction-pooling
@@ -167,8 +200,11 @@ uv run --locked scopelens history-reconcile
 ```
 
 `history-scan scope.local.toml --profile conservative --run-id <new-UUID>` runs
-Nmap with history. Choose a new UUID for each scan attempt. Retrying an import
-with the same UUID, scope, profile, and bytes does not duplicate observations.
+Nmap with history. For httpx, add `--scanner httpx --origin <approved-origin>
+--address <approved-IP>`; `history-import` also requires `--scanner-version 1.12.0`.
+Run `history-init` to apply migrations before using these commands. Choose a new
+UUID for each scan attempt. Retrying an import with the same UUID, scanner context,
+scope, profile, and bytes does not duplicate observations.
 Changed input under an existing UUID is rejected. The default private root is
 `.scopelens/history`; pass the same `--artifacts` root to all history commands.
 
@@ -215,6 +251,13 @@ container ownership before cleanup. Run it on Linux with Docker available:
 
 ```sh
 SCOPELENS_POSTGRES_TEST=1 uv run --locked pytest tests/test_history.py
+```
+
+Local HTTP/HTTPS integration tests also verify Host/SNI, redirect containment, and
+scheme fallback with an explicitly supplied httpx binary:
+
+```sh
+SCOPELENS_HTTPX_BINARY=/usr/local/bin/httpx uv run --locked pytest tests/test_httpx_linux.py
 ```
 
 ## License

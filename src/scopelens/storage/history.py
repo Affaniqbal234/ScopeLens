@@ -6,11 +6,12 @@ from sqlalchemy import Connection, Engine, func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from scopelens.adapters.base import ImportContext, ParsedReport
-from scopelens.adapters.nmap import NmapAdapter
+from scopelens.adapters.httpx import HTTPX_VERSION
+from scopelens.adapters.registry import adapter_for
 from scopelens.config import ProjectConfig
 from scopelens.domain.evidence import EvidenceReference, Observation
-from scopelens.domain.scope import NetworkTarget, ScanProfile, ScopeViolation
-from scopelens.domain.services import ServiceEndpoint
+from scopelens.domain.scope import NetworkTarget, ScanProfile, ScopeViolation, WebTarget
+from scopelens.domain.services import HttpEndpoint, ServiceEndpoint
 from scopelens.storage import schema as s
 from scopelens.storage.artifacts import ArtifactError, ArtifactStore
 from scopelens.storage.database import HistoryError, locked_run
@@ -35,11 +36,33 @@ class History:
         profile_id: str,
         *,
         kind: str,
+        scanner: str = "nmap",
+        web_target: WebTarget | None = None,
+        scanner_version: str | None = None,
     ) -> None:
         config = ProjectConfig.model_validate(config.model_dump())
         profile = next((p for p in config.profiles if p.id == profile_id), None)
         if profile is None or kind not in ("scan", "import"):
             raise HistoryError("invalid run profile or kind")
+        adapter_for(scanner)
+        if scanner == "httpx":
+            if web_target is None or scanner_version != HTTPX_VERSION:
+                raise HistoryError(
+                    "httpx requires a web target and declared version 1.12.0"
+                )
+            config.project.scope.authorize_web(
+                web_target.origin, web_target.approved_addresses
+            )
+        elif web_target is not None or scanner_version is not None:
+            raise HistoryError("Nmap cannot use web import context")
+        input_context = (
+            {
+                "web_target": web_target.model_dump(mode="json"),
+                "scanner_version": scanner_version,
+            }
+            if web_target
+            else {}
+        )
         scope = config.project.scope.model_dump(mode="json")
         snapshot_id = _digest([config.project.id, scope])
         revision = sha256(profile.model_dump_json().encode()).hexdigest()
@@ -50,6 +73,18 @@ class History:
                 .first()
             )
             if existing:
+                stage = (
+                    connection.execute(select(s.stages).where(s.stages.c.id == run_id))
+                    .mappings()
+                    .one()
+                )
+                if (
+                    stage["scanner"] != scanner
+                    or stage["input_context"] != input_context
+                ):
+                    raise HistoryError(
+                        "run identifier already belongs to different scanner input"
+                    )
                 if (
                     existing["project_id"],
                     existing["scope_snapshot_id"],
@@ -86,7 +121,8 @@ class History:
                     id=run_id,
                     run_id=run_id,
                     project_id=config.project.id,
-                    scanner="nmap",
+                    scanner=scanner,
+                    input_context=input_context,
                     status="running",
                 )
             )
@@ -108,10 +144,18 @@ class History:
                 or len(stderr) > 65536
             ):
                 raise ArtifactError("run output exceeds its profile limit")
-            report = NmapAdapter().parse(
+            stage = (
+                connection.execute(select(s.stages).where(s.stages.c.id == run_id))
+                .mappings()
+                .one()
+            )
+            adapter = adapter_for(stage["scanner"])
+            report = adapter.parse(
                 raw,
                 ImportContext(
-                    profile_id=profile.id, profile_revision=run["profile_revision"]
+                    profile_id=profile.id,
+                    profile_revision=run["profile_revision"],
+                    **stage["input_context"],
                 ),
             )
             scope_data = connection.scalar(
@@ -134,6 +178,11 @@ class History:
                     scope.authorize_network(
                         NetworkTarget(address=subject.address, ports=(subject.port,))
                     )
+                elif isinstance(subject, HttpEndpoint):
+                    target = WebTarget.model_validate(
+                        stage["input_context"]["web_target"]
+                    )
+                    scope.authorize_web(subject.origin, target.approved_addresses)
                 elif subject not in allowed:
                     raise ScopeViolation("imported host exceeds run scope")
             if run["status"] == "succeeded":
@@ -152,7 +201,10 @@ class History:
                     raise HistoryError(
                         "completed run cannot ingest different artifacts"
                     )
-                for filename, data in (("stdout.xml", raw), ("stderr.txt", stderr)):
+                for filename, data in (
+                    (adapter.artifact_name, raw),
+                    ("stderr.txt", stderr),
+                ):
                     if self.artifacts.read(f"{run_id}/{filename}") != data:
                         raise ArtifactError("stored artifact is corrupt")
                 return report
@@ -162,7 +214,7 @@ class History:
                 )
             artifact_ids = {}
             for role, filename, data in (
-                ("stdout", "stdout.xml", raw),
+                ("stdout", adapter.artifact_name, raw),
                 ("stderr", "stderr.txt", stderr),
             ):
                 relative, digest, size = self.artifacts.publish(run_id, filename, data)
@@ -210,6 +262,14 @@ class History:
                         subject.address,
                         subject.transport,
                         subject.port,
+                    )
+                elif isinstance(subject, HttpEndpoint):
+                    identity, kind, address, transport, port = (
+                        subject.origin + "/",
+                        "origin",
+                        subject.origin,
+                        None,
+                        None,
                     )
                 else:
                     identity, kind, address, transport, port = (
@@ -315,7 +375,9 @@ class History:
                 )
             }
             root = next(
-                item for item in evidence.values() if item.record_locator == "/nmaprun"
+                item
+                for item in evidence.values()
+                if item.record_locator == adapter_for(stage["scanner"]).root_locator
             )
             observations = []
             query = (
@@ -343,6 +405,8 @@ class History:
                         address=row.address, transport=row.transport, port=row.port
                     )
                     if row.kind == "service"
+                    else HttpEndpoint(origin=row.address)
+                    if row.kind == "origin"
                     else row.address
                 )
                 observations.append(

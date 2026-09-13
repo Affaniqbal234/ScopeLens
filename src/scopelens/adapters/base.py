@@ -1,12 +1,15 @@
 from typing import Literal, Protocol
 
 from scopelens.domain.evidence import EvidenceReference, Observation, Text
+from scopelens.domain.scope import WebTarget
 from scopelens.domain.targets import DomainModel, Identifier
 
 
 class ImportContext(DomainModel):
     profile_id: Identifier
     profile_revision: Text
+    scanner_version: Text | None = None
+    web_target: WebTarget | None = None
 
 
 class ParsedReport(DomainModel):
@@ -20,4 +23,8 @@ class ReportParseError(ValueError):
 
 
 class ScannerAdapter(Protocol):
+    name: str
+    artifact_name: str
+    root_locator: str
+
     def parse(self, raw: bytes, context: ImportContext) -> ParsedReport: ...

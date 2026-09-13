@@ -68,6 +68,9 @@ stages = sa.Table(
     sa.Column("run_id", UUID(as_uuid=True), nullable=False, unique=True),
     sa.Column("project_id", sa.Text, nullable=False),
     sa.Column("scanner", sa.Text, nullable=False),
+    sa.Column(
+        "input_context", JSONB, nullable=False, server_default=sa.text("'{}'::jsonb")
+    ),
     sa.Column("reported_exit", sa.Text),
     sa.CheckConstraint(
         "reported_exit IS NULL OR reported_exit IN ('success', 'error')",
@@ -135,11 +138,11 @@ artifacts = sa.Table(
     sa.UniqueConstraint("id", "stage_id"),
     sa.CheckConstraint("role IN ('stdout', 'stderr')", name="artifact_role"),
     sa.CheckConstraint(
-        "relative_path ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/(stdout[.]xml|stderr[.]txt)$'",
+        "relative_path ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/(stdout[.](xml|jsonl)|stderr[.]txt)$'",
         name="artifact_path",
     ),
     sa.CheckConstraint(
-        "(role = 'stdout' AND relative_path LIKE '%/stdout.xml') OR (role = 'stderr' AND relative_path LIKE '%/stderr.txt')",
+        "(role = 'stdout' AND (relative_path LIKE '%/stdout.xml' OR relative_path LIKE '%/stdout.jsonl')) OR (role = 'stderr' AND relative_path LIKE '%/stderr.txt')",
         name="artifact_role_path",
     ),
     sa.CheckConstraint("sha256 ~ '^[0-9a-f]{64}$'", name="artifact_digest"),
