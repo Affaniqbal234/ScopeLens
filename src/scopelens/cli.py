@@ -45,6 +45,9 @@ def main(argv: list[str] | None = None) -> None:
     scan.add_argument("config", type=Path)
     scan.add_argument("--profile", required=True)
     scan.add_argument("--artifacts", type=Path, default=Path(".scopelens/artifacts"))
+    from scopelens.storage.cli import add_commands, run_history
+
+    add_commands(commands)
     args = parser.parse_args(argv)
     if args.command == "validate-config":
         try:
@@ -84,5 +87,7 @@ def main(argv: list[str] | None = None) -> None:
         print(
             f"Private artifacts: {str(result.artifacts.directory)!r}", file=sys.stderr
         )
+    elif args.command and args.command.startswith("history-"):
+        run_history(args, parser)
     else:
         parser.print_help()

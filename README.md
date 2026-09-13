@@ -147,6 +147,48 @@ Raw artifacts remain in the lab's named volume after shutdown. To delete that la
 data, run `docker compose -f lab/compose.yaml --profile scan down --volumes`.
 Keep this intentionally exposed fixture isolated.
 
+## Persistent history
+
+History uses PostgreSQL for projects, scope/profile snapshots, runs, stable entity
+identities, observations, and evidence metadata. Raw XML and stderr stay on a
+private Linux filesystem. Offline imports remain distinct from executed scans.
+
+Use a dedicated PostgreSQL database with a direct connection; transaction-pooling
+proxies do not preserve the per-run session locks. Set `SCOPELENS_DATABASE_URL` to its connection
+URL (`postgresql+psycopg://user:password@localhost:5432/scopelens`) through your
+local environment; keep credentials out of source control. Then run:
+
+```sh
+uv run --locked scopelens history-init
+uv run --locked scopelens history-import scope.local.toml report.xml --profile conservative --run-id 00000000-0000-4000-8000-000000000001
+uv run --locked scopelens history-list --project local-lab
+uv run --locked scopelens history-show 00000000-0000-4000-8000-000000000001
+uv run --locked scopelens history-reconcile
+```
+
+`history-scan scope.local.toml --profile conservative --run-id <new-UUID>` runs
+Nmap with history. Choose a new UUID for each scan attempt. Retrying an import
+with the same UUID, scope, profile, and bytes does not duplicate observations.
+Changed input under an existing UUID is rejected. The default private root is
+`.scopelens/history`; pass the same `--artifacts` root to all history commands.
+
+Files are flushed and published without overwriting existing artifacts before
+one database transaction commits evidence, observations, and successful status.
+Database rollback cannot remove published files. A write failure leaves the run
+pending (`running`), with bounded files retained. An import can retry the same
+input before reconciliation. Check `history-show` after an uncertain commit:
+acknowledgment failure does not prove that the transaction rolled back.
+
+Reconciliation skips runs held by an active session, marks abandoned running
+records `interrupted`, and reports missing, corrupted, and unreferenced files.
+It never deletes files or turns an interrupted scan into a successful result.
+Failed/interrupted runs require a new UUID; retained captures can be inspected
+or imported separately. Completed observations remain historical facts when an
+artifact goes missing; reconciliation reports the evidence availability problem.
+Scanner failures retain partial capture directories without promoting them to
+validated evidence. Back up the database and private root together while scans
+and imports are stopped. There is no automatic retention or deletion policy.
+
 ## Development
 
 ```sh
@@ -165,6 +207,14 @@ unique Compose project and removes its own containers and volumes afterward:
 
 ```sh
 SCOPELENS_LAB_TEST=1 uv run --locked pytest tests/test_lab.py
+```
+
+The PostgreSQL suite creates a disposable container with a loopback-only port and
+its own credentials and volume. It ignores operator database URLs and verifies
+container ownership before cleanup. Run it on Linux with Docker available:
+
+```sh
+SCOPELENS_POSTGRES_TEST=1 uv run --locked pytest tests/test_history.py
 ```
 
 ## License
