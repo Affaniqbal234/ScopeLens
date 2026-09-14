@@ -1,6 +1,9 @@
 import argparse
 import asyncio
+import json
 import sys
+from dataclasses import asdict
+from datetime import datetime
 from importlib.metadata import version
 from pathlib import Path
 
@@ -9,10 +12,17 @@ from pydantic import ValidationError
 from scopelens.adapters.base import ImportContext, ReportParseError
 from scopelens.adapters.httpx import import_httpx
 from scopelens.adapters.nmap import import_nmap
+from scopelens.adapters.nuclei import import_nuclei
+from scopelens.adapters.nuclei_templates import (
+    NUCLEI_VERSION,
+    reviewed_templates,
+    template_revision,
+)
 from scopelens.config import ConfigurationError, load_config
 from scopelens.domain.scope import ScopeViolation, WebTarget
 from scopelens.execution.httpx import HTTPX_EXECUTABLE, scan_httpx
 from scopelens.execution.nmap import scan_nmap
+from scopelens.execution.nuclei import NUCLEI_EXECUTABLE, scan_nuclei
 from scopelens.execution.process import ExecutionError
 
 
@@ -47,24 +57,37 @@ def main(argv: list[str] | None = None) -> None:
     scan.add_argument("config", type=Path)
     scan.add_argument("--profile", required=True)
     scan.add_argument("--artifacts", type=Path, default=Path(".scopelens/artifacts"))
+    commands.add_parser(
+        "nuclei-templates", help="show the bundled reviewed template manifest"
+    )
     for name, help_text in (
         ("import-httpx", "parse local httpx JSONL without scanning"),
         ("scan-httpx", "probe one authorized web origin on Linux"),
+        ("import-nuclei", "parse reviewed Nuclei JSONL without scanning"),
+        ("scan-nuclei", "run reviewed Nuclei HTTP checks on one approved origin"),
     ):
         web = commands.add_parser(name, help=help_text, allow_abbrev=False)
         web.add_argument("path", type=Path)
         web.add_argument("--origin", required=True)
         web.add_argument("--address", required=True)
-        if name == "import-httpx":
+        if name.startswith("import-"):
             web.add_argument("--profile-id", required=True)
             web.add_argument("--profile-revision", required=True)
             web.add_argument("--scanner-version", required=True)
+            if name == "import-nuclei":
+                web.add_argument("--template-revision", required=True)
+                web.add_argument(
+                    "--captured-at", type=datetime.fromisoformat, required=True
+                )
         else:
             web.add_argument("--profile", required=True)
             web.add_argument(
                 "--artifacts", type=Path, default=Path(".scopelens/artifacts")
             )
-            web.add_argument("--httpx-binary", default=HTTPX_EXECUTABLE)
+            if name == "scan-nuclei":
+                web.add_argument("--nuclei-binary", default=NUCLEI_EXECUTABLE)
+            else:
+                web.add_argument("--httpx-binary", default=HTTPX_EXECUTABLE)
     from scopelens.storage.cli import add_commands, run_history
 
     add_commands(commands)
@@ -107,27 +130,46 @@ def main(argv: list[str] | None = None) -> None:
         print(
             f"Private artifacts: {str(result.artifacts.directory)!r}", file=sys.stderr
         )
-    elif args.command in ("import-httpx", "scan-httpx"):
+    elif args.command == "nuclei-templates":
+        print(
+            json.dumps(
+                {
+                    "scanner_version": NUCLEI_VERSION,
+                    "revision": template_revision(),
+                    "templates": [asdict(item) for item in reviewed_templates()],
+                },
+                indent=2,
+            )
+        )
+    elif args.command in ("import-httpx", "scan-httpx", "import-nuclei", "scan-nuclei"):
         try:
             target = WebTarget(origin=args.origin, approved_addresses=(args.address,))
-            if args.command == "import-httpx":
-                report = import_httpx(
+            if args.command.startswith("import-"):
+                importer = (
+                    import_nuclei if args.command == "import-nuclei" else import_httpx
+                )
+                report = importer(
                     args.path,
                     ImportContext(
                         profile_id=args.profile_id,
                         profile_revision=args.profile_revision,
                         scanner_version=args.scanner_version,
                         web_target=target,
+                        template_revision=getattr(args, "template_revision", None),
+                        captured_at=getattr(args, "captured_at", None),
                     ),
                 )
             else:
+                scanner = scan_nuclei if args.command == "scan-nuclei" else scan_httpx
                 result = asyncio.run(
-                    scan_httpx(
+                    scanner(
                         load_config(args.path),
                         args.profile,
                         args.artifacts,
                         target,
-                        args.httpx_binary,
+                        args.nuclei_binary
+                        if args.command == "scan-nuclei"
+                        else args.httpx_binary,
                     )
                 )
                 report = result.report
@@ -145,9 +187,9 @@ def main(argv: list[str] | None = None) -> None:
                 parser.error(f"{exc}; private artifacts: {str(exc.artifacts)!r}")
             parser.error(str(exc))
         except ValidationError:
-            parser.error("invalid httpx target or profile metadata")
+            parser.error("invalid web target or scanner metadata")
         except KeyboardInterrupt:
-            parser.exit(130, "httpx cancelled; partial private artifacts retained\n")
+            parser.exit(130, "scan cancelled; partial private artifacts retained\n")
         print(report.model_dump_json(indent=2))
     elif args.command and args.command.startswith("history-"):
         run_history(args, parser)

@@ -90,12 +90,12 @@ async def run_process(
         raise ExecutionError("scanner executable must use an absolute path")
     if not 0 < timeout <= 120 or not 0 < output_limit <= 8 * 1024 * 1024:
         raise ExecutionError("invalid process limits")
-    if scanner not in ("nmap", "httpx"):
+    if scanner not in ("nmap", "httpx", "nuclei"):
         raise ExecutionError("unsupported scanner process")
     directory = (
         _private_directory(artifact_root.absolute())
         if scanner == "nmap"
-        else _private_directory(artifact_root.absolute(), "httpx-")
+        else _private_directory(artifact_root.absolute(), f"{scanner}-")
     )
     artifacts = RawArtifacts(
         directory,
@@ -141,6 +141,14 @@ async def run_process(
                     "LANG": "C",
                     "LC_ALL": "C",
                     "HOME": str(directory),
+                    **(
+                        {
+                            f"DISABLE_NUCLEI_TEMPLATES_{source}_DOWNLOAD": "true"
+                            for source in ("PUBLIC", "GITHUB", "GITLAB", "AWS", "AZURE")
+                        }
+                        if scanner == "nuclei"
+                        else {}
+                    ),
                 },
                 limit=16 * 1024,
             )

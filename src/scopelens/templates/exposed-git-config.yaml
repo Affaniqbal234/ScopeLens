@@ -1,0 +1,15 @@
+id: scopelens-exposed-git-config
+info:
+  name: Git configuration exposed
+  author: scopelens
+  severity: medium
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/.git/config"
+    redirects: false
+    matchers:
+      - type: dsl
+        name: git-config
+        dsl:
+          - 'status_code == 200 && contains(body, "[core]") && contains(body, "repositoryformatversion")'

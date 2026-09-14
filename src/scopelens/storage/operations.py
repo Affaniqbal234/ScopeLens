@@ -2,6 +2,7 @@ import asyncio
 import os
 import stat
 import warnings
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -9,11 +10,14 @@ from sqlalchemy import Connection, select
 
 from scopelens.adapters.base import ParsedReport, ReportParseError
 from scopelens.adapters.httpx import HTTPX_VERSION
+from scopelens.adapters.nuclei_templates import NUCLEI_VERSION, template_revision
 from scopelens.config import ProjectConfig
 from scopelens.domain.scope import ScopeViolation, WebTarget
 from scopelens.execution.httpx import HTTPX_EXECUTABLE, scan_httpx
 from scopelens.execution.httpx import build_command as httpx_command
 from scopelens.execution.nmap import build_command, scan_nmap
+from scopelens.execution.nuclei import NUCLEI_EXECUTABLE, scan_nuclei
+from scopelens.execution.nuclei import build_command as nuclei_command
 from scopelens.execution.process import ExecutionError
 from scopelens.storage import schema as s
 from scopelens.storage.artifacts import MAX_ARTIFACT_BYTES, ArtifactError
@@ -42,6 +46,8 @@ def import_history(
     scanner: str = "nmap",
     web_target: WebTarget | None = None,
     scanner_version: str | None = None,
+    template_bundle: str | None = None,
+    captured_at: datetime | None = None,
 ) -> ParsedReport:
     raw = read_input(path)
     with locked_run(history.engine, run_id) as connection:
@@ -54,6 +60,8 @@ def import_history(
             scanner=scanner,
             web_target=web_target,
             scanner_version=scanner_version,
+            template_revision=template_bundle,
+            captured_at=captured_at,
         )
         try:
             return history.ingest(connection, run_id, raw)
@@ -77,12 +85,16 @@ def scan_history(
     *,
     scanner: str = "nmap",
     web_target: WebTarget | None = None,
-    binary: str = HTTPX_EXECUTABLE,
+    binary: str | None = None,
 ) -> ParsedReport:
+    binary = binary or (NUCLEI_EXECUTABLE if scanner == "nuclei" else HTTPX_EXECUTABLE)
+    capture_time = datetime.now(UTC) if scanner == "nuclei" else None
     if scanner == "nmap":
         build_command(config, profile)
     elif scanner == "httpx" and web_target is not None:
         httpx_command(config, profile, web_target, binary)
+    elif scanner == "nuclei" and web_target is not None:
+        nuclei_command(config, profile, web_target, binary)
     else:
         raise HistoryError("invalid scanner target")
     with locked_run(history.engine, run_id) as connection:
@@ -101,12 +113,28 @@ def scan_history(
             kind="scan",
             scanner=scanner,
             web_target=web_target,
-            scanner_version=HTTPX_VERSION if scanner == "httpx" else None,
+            scanner_version={"httpx": HTTPX_VERSION, "nuclei": NUCLEI_VERSION}.get(
+                scanner
+            ),
+            template_revision=template_revision() if scanner == "nuclei" else None,
+            captured_at=capture_time,
         )
         directory = history.artifacts.directory(run_id)
         try:
             if scanner == "nmap":
                 result = asyncio.run(scan_nmap(config, profile, directory))
+            elif scanner == "nuclei":
+                assert web_target is not None
+                result = asyncio.run(
+                    scan_nuclei(
+                        config,
+                        profile,
+                        directory,
+                        web_target,
+                        binary,
+                        captured_at=capture_time,
+                    )
+                )
             else:
                 assert web_target is not None
                 result = asyncio.run(

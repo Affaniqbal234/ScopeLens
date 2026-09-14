@@ -80,7 +80,7 @@ def test_fresh_migration_and_repeat(engine: Engine) -> None:
     with engine.connect() as connection:
         assert (
             connection.scalar(text("SELECT version_num FROM alembic_version"))
-            == "0002_httpx"
+            == "0003_nuclei"
         )
         assert (
             compare_metadata(MigrationContext.configure(connection), s.metadata) == []
@@ -520,11 +520,14 @@ def test_migration_downgrade_in_disposable_schema(engine: Engine) -> None:
         connection.execute(
             update(s.stages).where(s.stages.c.id == run_id).values(scanner="httpx")
         )
-        with pytest.raises(RuntimeError, match="httpx history exists"):
+        with (
+            pytest.raises(RuntimeError, match="httpx history exists"),
+            connection.begin_nested(),
+        ):
             command.downgrade(config, "0001_scan_history")
         assert (
             connection.scalar(text("SELECT version_num FROM alembic_version"))
-            == "0002_httpx"
+            == "0003_nuclei"
         )
         connection.execute(
             update(s.stages).where(s.stages.c.id == run_id).values(scanner="nmap")
@@ -537,7 +540,7 @@ def test_migration_downgrade_in_disposable_schema(engine: Engine) -> None:
         command.upgrade(config, "head")
         assert (
             connection.scalar(text("SELECT version_num FROM alembic_version"))
-            == "0002_httpx"
+            == "0003_nuclei"
         )
         # This generated schema exists only in this test-owned database.
         connection.execute(text(f'DROP SCHEMA "{name}" CASCADE'))

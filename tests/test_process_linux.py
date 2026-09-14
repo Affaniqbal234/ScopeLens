@@ -36,7 +36,7 @@ def test_real_process_and_private_artifacts(tmp_path: Path) -> None:
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
-@pytest.mark.parametrize("scanner", ["nmap", "httpx"])
+@pytest.mark.parametrize("scanner", ["nmap", "httpx", "nuclei"])
 @pytest.mark.parametrize("mode", ["timeout", "overflow", "cancel", "descendant"])
 def test_real_cleanup_is_bounded_under_pipe_pressure(
     tmp_path: Path, mode: str, scanner: str

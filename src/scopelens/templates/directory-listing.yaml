@@ -1,0 +1,15 @@
+id: scopelens-directory-listing
+info:
+  name: Directory listing exposed
+  author: scopelens
+  severity: low
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/"
+    redirects: false
+    matchers:
+      - type: dsl
+        name: listing
+        dsl:
+          - 'status_code == 200 && (contains(body, "<title>Directory listing for /") || contains(body, "<title>Index of /")) && contains(body, "href=")'

@@ -1,6 +1,6 @@
 # ScopeLens
 
-ScopeLens validates authorized assessment scopes, runs bounded Nmap and httpx probes
+ScopeLens validates authorized assessment scopes, runs bounded Nmap, httpx, and Nuclei checks
 on Linux, and stores normalized observations with source evidence in PostgreSQL.
 
 ## Setup
@@ -158,6 +158,41 @@ host. They never contact targets. Malformed, duplicate, partial, or out-of-scope
 records reject the whole import. JSONL has no completion marker; live execution
 also requires a successful process exit and evidence for the selected address.
 
+## Restricted Nuclei assessment
+
+[ProjectDiscovery Nuclei v3.11.1](https://github.com/projectdiscovery/nuclei/releases/tag/v3.11.1)
+is supported at `/usr/local/bin/nuclei`, or an absolute `--nuclei-binary` path.
+Two bundled HTTP templates check directory listings at `/` and exposed Git
+configuration at `/.git/config`. Their scanner severities are low and medium.
+Both use a single GET request, with no payload lists or external interactions.
+
+```sh
+uv run --locked scopelens nuclei-templates
+uv run --locked scopelens scan-nuclei scope.local.toml --profile conservative --origin http://localhost:8000 --address 127.0.0.1
+```
+
+The manifest pins each template's SHA-256 revision. Execution copies verified
+bytes into a private directory and runs only those templates. Template paths and
+scanner flags cannot be supplied through the CLI. Updates, template downloads,
+redirects, Interactsh, and automatic HTTP discovery are disabled. Requests keep
+the approved address, origin's Host header, and TLS SNI. Linux process deadlines,
+request-rate limits, output caps, and private artifact permissions also apply.
+
+Matches retain template and matcher identity, revision, matched location, scanner
+severity, and raw JSONL evidence references. Every match is `unvalidated`.
+An empty report means no matches were reported; it does not establish successful
+coverage, a fixed vulnerability, or a secure target. Nuclei can exit successfully
+when requests fail. Raw request/response evidence may contain sensitive data.
+
+Use `history-scan` with `--scanner nuclei --origin <origin> --address <IP>` to
+persist an assessment after running `history-init`. Offline `import-nuclei` and
+`history-import --scanner nuclei` also require `--scanner-version 3.11.1`,
+`--template-revision <manifest-revision>`, and `--captured-at <ISO-timestamp>`.
+Imports accept only output containing the bundled templates' encoded bytes.
+Capture time is declared context (run start for live scans); individual matches
+retain their scanner timestamps. Reusing a run ID requires identical context and
+artifact bytes. Matches are stored per run, without cross-run merging or validation.
+
 ## Controlled lab
 
 The lab exposes a harmless sample backup through a directory listing on port
@@ -258,6 +293,13 @@ scheme fallback with an explicitly supplied httpx binary:
 
 ```sh
 SCOPELENS_HTTPX_BINARY=/usr/local/bin/httpx uv run --locked pytest tests/test_httpx_linux.py
+```
+
+Nuclei tests use temporary vulnerable/fixed localhost services. With the pinned
+binary installed, run their HTTP/TLS and disposable PostgreSQL checks on Linux:
+
+```sh
+SCOPELENS_NUCLEI_BINARY=/usr/local/bin/nuclei SCOPELENS_POSTGRES_TEST=1 uv run --locked pytest tests/test_nuclei.py tests/test_nuclei_linux.py tests/test_nuclei_history.py
 ```
 
 ## License

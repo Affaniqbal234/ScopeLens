@@ -1,0 +1,18 @@
+[
+  {
+    "filename": "directory-listing.yaml",
+    "id": "scopelens-directory-listing",
+    "matcher": "listing",
+    "severity": "low",
+    "path": "/",
+    "sha256": "45815d576542821c59a7c4cbdb7ce69da5f902ad7ac6cc27784169397a366131"
+  },
+  {
+    "filename": "exposed-git-config.yaml",
+    "id": "scopelens-exposed-git-config",
+    "matcher": "git-config",
+    "severity": "medium",
+    "path": "/.git/config",
+    "sha256": "8e0b3eb3ae50f11cdf2039c0db8fd641d27b2581b642a6946154ab4ce503df50"
+  }
+]

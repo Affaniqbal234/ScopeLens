@@ -208,3 +208,27 @@ observation_evidence = sa.Table(
         ["evidence_id", "stage_id"], ["evidence.id", "evidence.stage_id"]
     ),
 )
+
+
+scanner_matches = sa.Table(
+    "scanner_matches",
+    metadata,
+    sa.Column("id", UUID(as_uuid=True), primary_key=True),
+    sa.Column("stage_id", UUID(as_uuid=True), nullable=False),
+    sa.Column("ordinal", sa.Integer, nullable=False),
+    sa.Column("evidence_id", UUID(as_uuid=True), nullable=False),
+    sa.Column("metadata", JSONB, nullable=False),
+    sa.ForeignKeyConstraint(
+        ["evidence_id", "stage_id"], ["evidence.id", "evidence.stage_id"]
+    ),
+    sa.UniqueConstraint("stage_id", "ordinal"),
+    sa.CheckConstraint("ordinal >= 0", name="match_ordinal"),
+    sa.CheckConstraint(
+        "metadata->>'assessment' IS NOT NULL AND metadata->>'assessment' = 'unvalidated'",
+        name="match_assessment",
+    ),
+    sa.CheckConstraint(
+        "metadata->>'scanner_severity' IS NOT NULL AND metadata->>'scanner_severity' IN ('info','low','medium','high','critical','unknown')",
+        name="match_severity",
+    ),
+)

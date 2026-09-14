@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -12,6 +13,7 @@ from scopelens.adapters.base import ReportParseError
 from scopelens.config import ConfigurationError, load_config
 from scopelens.domain.scope import ScopeViolation, WebTarget
 from scopelens.execution.httpx import HTTPX_EXECUTABLE
+from scopelens.execution.nuclei import NUCLEI_EXECUTABLE
 from scopelens.execution.process import ExecutionError
 from scopelens.storage.artifacts import ArtifactError, ArtifactStore
 from scopelens.storage.database import HistoryError, database, migrate
@@ -51,6 +53,8 @@ def run_history(args: argparse.Namespace, parser: argparse.ArgumentParser) -> No
                     scanner=args.scanner,
                     web_target=target,
                     scanner_version=args.scanner_version,
+                    template_bundle=args.template_revision,
+                    captured_at=args.captured_at,
                 )
             else:
                 report = scan_history(
@@ -60,7 +64,9 @@ def run_history(args: argparse.Namespace, parser: argparse.ArgumentParser) -> No
                     args.run_id,
                     scanner=args.scanner,
                     web_target=target,
-                    binary=args.httpx_binary,
+                    binary=args.nuclei_binary
+                    if args.scanner == "nuclei"
+                    else args.httpx_binary,
                 )
             print(report.model_dump_json(indent=2))
         elif args.command == "history-list":
@@ -114,14 +120,19 @@ def add_commands(commands: argparse._SubParsersAction[argparse.ArgumentParser]) 
             command.add_argument("config", type=Path)
             command.add_argument("--profile", required=True)
             command.add_argument("--run-id", type=UUID, required=True)
-            command.add_argument("--scanner", choices=("nmap", "httpx"), default="nmap")
+            command.add_argument(
+                "--scanner", choices=("nmap", "httpx", "nuclei"), default="nmap"
+            )
             command.add_argument("--origin")
             command.add_argument("--address")
         if name == "history-import":
             command.add_argument("path", type=Path)
             command.add_argument("--scanner-version")
+            command.add_argument("--template-revision")
+            command.add_argument("--captured-at", type=datetime.fromisoformat)
         if name == "history-scan":
             command.add_argument("--httpx-binary", default=HTTPX_EXECUTABLE)
+            command.add_argument("--nuclei-binary", default=NUCLEI_EXECUTABLE)
         if name == "history-list":
             command.add_argument("--project", required=True)
         if name == "history-show":

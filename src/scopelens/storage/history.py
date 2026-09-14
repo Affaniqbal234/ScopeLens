@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from hashlib import sha256
 from uuid import UUID, uuid4
 
@@ -7,9 +8,12 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from scopelens.adapters.base import ImportContext, ParsedReport
 from scopelens.adapters.httpx import HTTPX_VERSION
+from scopelens.adapters.nuclei_templates import NUCLEI_VERSION
+from scopelens.adapters.nuclei_templates import template_revision as reviewed_revision
 from scopelens.adapters.registry import adapter_for
 from scopelens.config import ProjectConfig
 from scopelens.domain.evidence import EvidenceReference, Observation
+from scopelens.domain.findings import ScannerMatch
 from scopelens.domain.scope import NetworkTarget, ScanProfile, ScopeViolation, WebTarget
 from scopelens.domain.services import HttpEndpoint, ServiceEndpoint
 from scopelens.storage import schema as s
@@ -39,22 +43,26 @@ class History:
         scanner: str = "nmap",
         web_target: WebTarget | None = None,
         scanner_version: str | None = None,
+        template_revision: str | None = None,
+        captured_at: datetime | None = None,
     ) -> None:
         config = ProjectConfig.model_validate(config.model_dump())
         profile = next((p for p in config.profiles if p.id == profile_id), None)
         if profile is None or kind not in ("scan", "import"):
             raise HistoryError("invalid run profile or kind")
         adapter_for(scanner)
-        if scanner == "httpx":
-            if web_target is None or scanner_version != HTTPX_VERSION:
+        if scanner in ("httpx", "nuclei"):
+            expected_version = HTTPX_VERSION if scanner == "httpx" else NUCLEI_VERSION
+            if web_target is None or scanner_version != expected_version:
                 raise HistoryError(
-                    "httpx requires a web target and declared version 1.12.0"
+                    "web assessment requires a target and supported scanner version"
                 )
             config.project.scope.authorize_web(
                 web_target.origin, web_target.approved_addresses
             )
         elif web_target is not None or scanner_version is not None:
             raise HistoryError("Nmap cannot use web import context")
+        revision = sha256(profile.model_dump_json().encode()).hexdigest()
         input_context = (
             {
                 "web_target": web_target.model_dump(mode="json"),
@@ -63,9 +71,35 @@ class History:
             if web_target
             else {}
         )
+        if scanner == "nuclei":
+            if (
+                template_revision != reviewed_revision()
+                or captured_at is None
+                or web_target is None
+                or len(web_target.approved_addresses) != 1
+            ):
+                raise HistoryError(
+                    "Nuclei requires the reviewed template revision, capture time, and one address"
+                )
+            context = ImportContext(
+                profile_id=profile.id,
+                profile_revision=revision,
+                web_target=web_target,
+                scanner_version=scanner_version,
+                template_revision=template_revision,
+                captured_at=captured_at,
+            )
+            input_context = context.model_dump(
+                mode="json",
+                exclude={"profile_id", "profile_revision"},
+                exclude_none=True,
+            )
+        elif template_revision is not None or captured_at is not None:
+            raise HistoryError(
+                "template revision and capture time are only valid for Nuclei"
+            )
         scope = config.project.scope.model_dump(mode="json")
         snapshot_id = _digest([config.project.id, scope])
-        revision = sha256(profile.model_dump_json().encode()).hexdigest()
         with connection.begin():
             existing = (
                 connection.execute(select(s.runs).where(s.runs.c.id == run_id))
@@ -185,6 +219,9 @@ class History:
                     scope.authorize_web(subject.origin, target.approved_addresses)
                 elif subject not in allowed:
                     raise ScopeViolation("imported host exceeds run scope")
+            for match in report.matches:
+                target = WebTarget.model_validate(stage["input_context"]["web_target"])
+                scope.authorize_web(match.origin, target.approved_addresses)
             if run["status"] == "succeeded":
                 expected = {
                     row.role: row.sha256
@@ -239,6 +276,7 @@ class History:
                     for observation in report.observations
                     for ref in observation.evidence
                 ),
+                *(ref for match in report.matches for ref in match.evidence),
             ):
                 locator = reference.record_locator
                 if locator not in evidence_ids:
@@ -320,6 +358,16 @@ class History:
                             stage_id=run_id,
                         )
                     )
+            for ordinal, match in enumerate(report.matches):
+                connection.execute(
+                    insert(s.scanner_matches).values(
+                        id=uuid4(),
+                        stage_id=run_id,
+                        ordinal=ordinal,
+                        evidence_id=evidence_ids[match.evidence[0].record_locator],
+                        metadata=match.model_dump(mode="json"),
+                    )
+                )
             self._finish(connection, run_id, "succeeded")
             connection.execute(
                 update(s.stages)
@@ -421,6 +469,14 @@ class History:
                 evidence=root,
                 reported_exit=stage["reported_exit"],
                 observations=tuple(observations),
+                matches=tuple(
+                    ScannerMatch.model_validate(value)
+                    for value in connection.scalars(
+                        select(s.scanner_matches.c.metadata)
+                        .where(s.scanner_matches.c.stage_id == run_id)
+                        .order_by(s.scanner_matches.c.ordinal)
+                    )
+                ),
             )
 
     def reconcile(self) -> list[dict[str, str]]:
