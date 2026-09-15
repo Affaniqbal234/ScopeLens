@@ -241,7 +241,8 @@ Run `history-init` to apply migrations before using these commands. Choose a new
 UUID for each scan attempt. Retrying an import with the same UUID, scanner context,
 scope, profile, and bytes does not duplicate observations.
 Changed input under an existing UUID is rejected. The default private root is
-`.scopelens/history`; pass the same `--artifacts` root to all history commands.
+`.scopelens/history`; pass the same `--artifacts` root to commands that read or
+write artifacts.
 
 Files are flushed and published without overwriting existing artifacts before
 one database transaction commits evidence, observations, and successful status.
@@ -259,6 +260,25 @@ artifact goes missing; reconciliation reports the evidence availability problem.
 Scanner failures retain partial capture directories without promoting them to
 validated evidence. Back up the database and private root together while scans
 and imports are stopped. There is no automatic retention or deletion policy.
+
+Correlate explicitly selected completed runs from one project as JSON:
+
+```sh
+uv run --locked scopelens history-correlate --project local-lab --run-id 00000000-0000-4000-8000-000000000001 --run-id 00000000-0000-4000-8000-000000000002
+```
+
+The projection groups exact observations and scanner matches while retaining every
+source occurrence and evidence reference. Hosts, network services, HTTP origins,
+and resources keep separate identities. Configured addresses, reported targets,
+and reported peers remain distinct relationships and do not grant scope. Finding
+identity `finding-v1` uses the project, canonical origin, exact resource, template
+ID, and matcher ID. Matches remain `unvalidated`. Runs with identical scanner
+output are identified without hiding either acquisition event.
+
+Correlation reads PostgreSQL without reading artifact files, resolving target
+names, contacting assessed systems, or running scanners. It computes the result
+in memory and does not modify history. Missing, repeated, incomplete, or
+cross-project run selections are rejected.
 
 ## Development
 
@@ -285,7 +305,7 @@ its own credentials and volume. It ignores operator database URLs and verifies
 container ownership before cleanup. Run it on Linux with Docker available:
 
 ```sh
-SCOPELENS_POSTGRES_TEST=1 uv run --locked pytest tests/test_history.py
+SCOPELENS_POSTGRES_TEST=1 uv run --locked pytest tests/test_history.py tests/test_correlation_history.py
 ```
 
 Local HTTP/HTTPS integration tests also verify Host/SNI, redirect containment, and
