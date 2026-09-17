@@ -314,6 +314,19 @@ Stored httpx metadata can support presence, but cannot establish absence.
 The rule does not validate policy, TLS certificates, or browser behavior.
 Assessment does not assign historical resolved or changed states.
 
+Compare explicit baseline and current run selections:
+
+```sh
+uv run --locked scopelens history-compare --project local-lab --baseline-run-id 00000000-0000-4000-8000-000000000001 --current-run-id 00000000-0000-4000-8000-000000000002
+```
+
+Historical comparison reports `new`, `changed`, `unchanged`, `resolved`,
+`not_observed`, or `unknown` for each exact rule, origin, resource, and address.
+`resolved` requires a later supported negative from the same rule version and
+backend context. Missing findings, omitted checks, failed checks, scope changes,
+unhealthy evidence, and responses from another address cannot establish resolution.
+The command reads the selected history without modifying it or choosing runs by date.
+
 ## Development
 
 ```sh

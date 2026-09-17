@@ -286,3 +286,43 @@ def test_nuclei_only_and_empty_reports_use_declared_context(
     assert result.findings == ()
     assert result.assertions == ()
     assert {rel.kind for rel in result.relationships} == {"configured_address"}
+
+
+def test_history_comparison_is_read_only_and_rechecks_artifact_health(
+    history: History,
+    config: ProjectConfig,
+    tmp_path: Path,
+) -> None:
+    baseline = imported(history, config, tmp_path)
+    current = imported(history, config, tmp_path, raw=b"")
+    before = counts(history.engine)
+    result = storage.compare_history(
+        history.engine,
+        history.artifacts,
+        config.project.id,
+        [baseline],
+        [current],
+    )
+    assert counts(history.engine) == before
+    directory = next(
+        item
+        for item in result.results
+        if item.claim.rule_id == "scopelens.directory-listing"
+    )
+    assert directory.state == "not_observed"
+
+    (history.artifacts.root / str(baseline) / "stdout.jsonl").unlink()
+    missing = storage.compare_history(
+        history.engine,
+        history.artifacts,
+        config.project.id,
+        [baseline],
+        [current],
+    )
+    directory = next(
+        item
+        for item in missing.results
+        if item.claim.rule_id == "scopelens.directory-listing"
+    )
+    assert directory.state == "unknown"
+    assert directory.coverage.reason == "evidence_artifact_unhealthy"

@@ -1,3 +1,4 @@
+from pathlib import Path
 from unittest.mock import Mock
 from uuid import UUID
 
@@ -69,6 +70,68 @@ def test_history_assess_is_read_only_and_uses_selected_projection(
     correlate_call.assert_called_once_with(engine, "lab", [UUID(int=1)])
     engine.dispose.assert_called_once()
     artifacts.assert_not_called()
+
+
+def test_history_compare_requires_explicit_sides_and_is_read_only(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    from scopelens.comparison.compare import compare_assessments
+
+    baseline_projection = correlate(
+        "lab", (source(matches=(match(template="scopelens-directory-listing"),)),)
+    )
+    current_projection = correlate("lab", (source(2),))
+    expected = compare_assessments(
+        assess_correlation(baseline_projection),
+        assess_correlation(current_projection),
+        baseline_correlation=baseline_projection,
+        current_correlation=current_projection,
+    )
+    engine = Mock()
+    compare_call = Mock(return_value=expected)
+    artifact_store = Mock()
+    artifacts = Mock(return_value=artifact_store)
+    monkeypatch.setenv("SCOPELENS_DATABASE_URL", "test-only")
+    monkeypatch.setattr(cli, "database", Mock(return_value=engine))
+    monkeypatch.setattr(cli, "compare_history", compare_call)
+    monkeypatch.setattr(cli, "ArtifactStore", artifacts)
+    main(
+        [
+            "history-compare",
+            "--project",
+            "lab",
+            "--artifacts",
+            str(tmp_path),
+            "--baseline-run-id",
+            str(UUID(int=1)),
+            "--current-run-id",
+            str(UUID(int=2)),
+        ]
+    )
+    assert capsys.readouterr().out == expected.model_dump_json(indent=2) + "\n"
+    compare_call.assert_called_once_with(
+        engine, artifact_store, "lab", [UUID(int=1)], [UUID(int=2)]
+    )
+    engine.dispose.assert_called_once()
+    artifacts.assert_called_once_with(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--project", "lab", "--baseline-run-id", str(UUID(int=1))],
+        ["--project", "lab", "--current-run-id", str(UUID(int=2))],
+    ],
+)
+def test_history_compare_rejects_implicit_side_selection(
+    arguments: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["history-compare", *arguments])
+    assert exc.value.code == 2
+    assert capsys.readouterr().out == ""
 
 
 def test_cli_projection_error_has_no_partial_output(
