@@ -48,11 +48,9 @@ def run_history(args: argparse.Namespace, parser: argparse.ArgumentParser) -> No
             print(output.model_dump_json(indent=2))
             return
         if args.command == "history-compare":
-            if not args.artifacts.exists():
-                raise ArtifactError("artifact root does not exist")
             comparison = compare_history(
                 engine,
-                ArtifactStore(args.artifacts),
+                ArtifactStore(args.artifacts, create=False),
                 args.project,
                 args.baseline_run_id,
                 args.current_run_id,
@@ -149,6 +147,8 @@ def add_commands(commands: argparse._SubParsersAction[argparse.ArgumentParser]) 
         ),
     ):
         command = commands.add_parser(name, help=help_text, allow_abbrev=False)
+        if name == "history-compare":
+            command.description = "Compare stored scanner history. Fresh rechecks are not persisted, so this command cannot establish resolved."
         if name not in ("history-correlate", "history-assess"):
             command.add_argument(
                 "--artifacts", type=Path, default=Path(".scopelens/history")

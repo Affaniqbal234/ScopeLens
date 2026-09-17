@@ -108,6 +108,8 @@ def test_controlled_vulnerable_and_fixed_rechecks(
     ]
     assert len({item.id for item in report.acquisitions}) == 2
     for acquisition in report.acquisitions:
+        assert acquisition.finished_at is not None
+        assert acquisition.finished_at >= acquisition.started_at
         assert acquisition.evidence is not None
         artifact = Path(acquisition.evidence.artifact_path)
         assert artifact.stat().st_mode & 0o777 == 0o600

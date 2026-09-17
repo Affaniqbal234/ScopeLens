@@ -348,6 +348,7 @@ async def _acquire(
         RecheckAcquisition(
             id=acquisition_id,
             started_at=started,
+            finished_at=datetime.now(UTC),
             origin=target.origin,
             approved_address=address,
             resource=resource,

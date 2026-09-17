@@ -9,7 +9,7 @@ from scopelens.adapters.base import ImportContext
 from scopelens.analysis.correlation import CorrelationError, correlate
 from scopelens.analysis.models import CorrelationResult, RunSource, StoredArtifact
 from scopelens.assessment.capture import assess_correlation
-from scopelens.comparison.compare import compare_assessments
+from scopelens.comparison.compare import ArtifactHealth, compare_assessments
 from scopelens.comparison.models import HistoricalComparisonReport
 from scopelens.domain.scope import ScanProfile
 from scopelens.domain.targets import Identifier
@@ -64,6 +64,7 @@ def correlate_history(
                     project_id=project_id,
                     kind=run["kind"],
                     created_at=run["created_at"],
+                    finished_at=run["finished_at"],
                     scope_snapshot_id=run["scope_snapshot_id"],
                     profile=profile,
                     context=ImportContext(
@@ -107,10 +108,11 @@ def compare_history(
     selected = tuple(sorted(set(baseline_run_ids) | set(current_run_ids)))
     combined = correlate_history(engine, project_id, selected)
     verified_sources = []
+    verified_health: dict[tuple[UUID, str], ArtifactHealth] = {}
     for source in combined.sources:
         verified_artifacts = []
         for artifact in source.artifacts:
-            health = "ready"
+            health: ArtifactHealth = "ready"
             try:
                 raw = artifacts.read(artifact.relative_path)
                 if (
@@ -122,6 +124,8 @@ def compare_history(
                 health = "missing"
             except OSError, ArtifactError:
                 health = "corrupt"
+            if artifact.role == "stdout":
+                verified_health[(source.run_id, artifact.sha256)] = health
             verified_artifacts.append(
                 artifact.model_copy(update={"recorded_health": health})
             )
@@ -144,4 +148,6 @@ def compare_history(
         assess_correlation(current),
         baseline_correlation=baseline,
         current_correlation=current,
+        baseline_capture_health=verified_health,
+        current_capture_health=verified_health,
     )

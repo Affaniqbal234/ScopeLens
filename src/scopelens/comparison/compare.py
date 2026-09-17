@@ -6,6 +6,7 @@ from uuid import UUID
 
 from scopelens.adapters.nuclei_templates import reviewed_templates
 from scopelens.analysis.models import CorrelationResult, RunSource
+from scopelens.assessment.capture import assess_correlation
 from scopelens.assessment.models import (
     AssessmentResult,
     CaptureAssessmentReport,
@@ -15,7 +16,7 @@ from scopelens.assessment.models import (
     RecheckAcquisition,
     RecheckReport,
 )
-from scopelens.assessment.rules import DIRECTORY_RULE, GIT_CONFIG_RULE
+from scopelens.assessment.rules import DIRECTORY_RULE, GIT_CONFIG_RULE, HSTS_RULE
 from scopelens.comparison.models import (
     AssessmentReference,
     ClaimKey,
@@ -27,11 +28,13 @@ from scopelens.comparison.models import (
     HistoricalState,
     comparison_id,
 )
+from scopelens.domain.services import HttpEndpoint
 
 type AssessmentReport = CaptureAssessmentReport | RecheckReport
 type SemanticKey = tuple[str, str, str]
 type ContextKey = tuple[str, str, str, str | None]
 type ArtifactHealth = Literal["ready", "missing", "corrupt"]
+type CaptureHealth = Mapping[tuple[UUID, str], ArtifactHealth]
 
 _NOT_OBSERVED_REASONS = {"check_not_run", "no_supported_negative_evidence"}
 _MATERIAL_FACTS = {"http.header.strict_transport_security"}
@@ -53,11 +56,14 @@ class _Entry:
     observed_at: tuple[datetime, ...]
     healthy: bool
     health_reason: str | None
+    semantics_valid: bool
+    started_at: datetime | None
+    finished_at: datetime | None
+    artifact_digests: frozenset[str]
 
 
 @dataclass(frozen=True)
 class _Side:
-    report: AssessmentReport
     entries: dict[ContextKey, _Entry]
     selection: ComparisonSelection
 
@@ -84,20 +90,29 @@ def _capture_sources(
         source.run_id for source in correlation.sources
     }:
         raise ComparisonError("assessment and correlation selections do not match")
+    if any(source.project_id != report.project_id for source in correlation.sources):
+        raise ComparisonError("correlation sources must belong to the selected project")
     return {source.run_id: source for source in correlation.sources}
 
 
 def _evidence_health(
-    source: RunSource, use: ExistingCaptureUse
+    source: RunSource, use: ExistingCaptureUse, verified: CaptureHealth | None
 ) -> tuple[bool, str | None]:
     artifacts = [
         artifact
         for artifact in source.artifacts
-        if artifact.sha256 == use.evidence.artifact_sha256
+        if artifact.role == "stdout" and artifact.sha256 == use.evidence.artifact_sha256
     ]
     if not artifacts:
         return False, "evidence_artifact_unavailable"
-    if any(artifact.recorded_health != "ready" for artifact in artifacts):
+    health = (
+        verified.get((source.run_id, use.evidence.artifact_sha256))
+        if verified is not None
+        else None
+    )
+    if health is None:
+        return False, "capture_evidence_health_unverified"
+    if health != "ready":
         return False, "evidence_artifact_unhealthy"
     return True, None
 
@@ -107,19 +122,148 @@ def _semantic_key(assessment: AssessmentResult) -> SemanticKey:
     return claim.rule_id, claim.origin, claim.resource
 
 
+def _capture_address(source: RunSource, use: ExistingCaptureUse) -> str | None:
+    target = source.context.web_target
+    if target is None:
+        return None
+    if use.evidence.scanner == "httpx":
+        # A peer belongs to one response record, not every response at the origin.
+        peers = {
+            observation.value
+            for observation in source.report.observations
+            if observation.key == "http.peer_address"
+            and observation.subject == HttpEndpoint(origin=target.origin)
+            and use.evidence in observation.evidence
+        }
+        if len(peers) == 1:
+            peer = next(iter(peers))
+            if isinstance(peer, str) and peer in target.approved_addresses:
+                return peer
+        attempted = {
+            observation.key: observation.value
+            for observation in source.report.observations
+            if observation.subject == HttpEndpoint(origin=target.origin)
+            and use.evidence in observation.evidence
+            and observation.key in ("http.probe_succeeded", "http.target_address")
+        }
+        address = attempted.get("http.target_address")
+        if (
+            not peers
+            and attempted.get("http.probe_succeeded") is False
+            and isinstance(address, str)
+            and address in target.approved_addresses
+        ):
+            return address
+        return None
+    if (
+        use.evidence.scanner == "nuclei"
+        and source.kind == "scan"
+        and len(target.approved_addresses) == 1
+    ):
+        # Completed managed Nuclei executions use a literal destination with redirects disabled.
+        return target.approved_addresses[0]
+    return None
+
+
+def _same_assessment_evidence(
+    assessment: AssessmentResult, expected: AssessmentResult | None
+) -> bool:
+    return expected is not None and (
+        assessment.outcome == expected.outcome
+        and assessment.reason == expected.reason
+        and {
+            use.model_copy(
+                update={"facts": tuple(sorted(use.facts, key=lambda fact: fact.key))}
+            )
+            for use in assessment.evidence_used
+        }
+        == {
+            use.model_copy(
+                update={"facts": tuple(sorted(use.facts, key=lambda fact: fact.key))}
+            )
+            for use in expected.evidence_used
+        }
+        and {(item.id, item.state) for item in assessment.prerequisites}
+        == {(item.id, item.state) for item in expected.prerequisites}
+    )
+
+
+def _fresh_context_valid(
+    assessment: AssessmentResult, acquisition: RecheckAcquisition, use: FreshRecheckUse
+) -> bool:
+    claim = assessment.claim
+    if claim.origin != acquisition.origin or claim.resource != acquisition.resource:
+        return False
+    if assessment.outcome == "inconclusive":
+        return assessment.reason != "no_supported_negative_evidence" and (
+            assessment.reason != "check_not_run" or acquisition.status == "not_run"
+        )
+    required = (
+        {
+            "https_origin",
+            "hostname_origin",
+            "intended_resource",
+            "complete_headers",
+            "usable_response",
+        }
+        if claim.rule_id == HSTS_RULE
+        else {"authorized_target", "intended_resource", "complete_response"}
+    )
+    response = acquisition.response
+    if (
+        acquisition.evidence is None
+        or response is None
+        or not response.headers_complete
+        or response.access_challenge_present
+        or not response.content_encoding_identity
+        or any(item.state != "met" for item in assessment.prerequisites)
+        or {item.id for item in assessment.prerequisites} != required
+    ):
+        return False
+    facts = {fact.key: fact.value for fact in use.facts}
+    if (
+        len(facts) != len(use.facts)
+        or facts.get("http.status_code") != response.status_code
+    ):
+        return False
+    positive = assessment.outcome == "supported_positive"
+    if claim.rule_id == HSTS_RULE:
+        return (
+            acquisition.status in ("complete", "truncated")
+            and response.status_code == 200
+            and facts.get("http.headers_complete") is True
+            and response.strict_transport_security_present == positive
+            and facts.get("http.header.strict_transport_security_present") is positive
+        )
+    return (
+        acquisition.status == "complete"
+        and response.body_complete
+        and response.status_code in ((200,) if positive else (200, 404, 410))
+        and facts.get("http.body_complete") is True
+        and facts.get("http.body_sha256") == response.body_sha256
+        and facts.get("rule.markers_present") is positive
+    )
+
+
 def _build_side(
     report: AssessmentReport,
     correlation: CorrelationResult | None,
     acquisition_health: Mapping[UUID, ArtifactHealth] | None,
+    capture_health: CaptureHealth | None,
 ) -> _Side:
     sources: dict[UUID, RunSource] = {}
     acquisitions: dict[UUID, RecheckAcquisition] = {}
+    expected: dict[str, AssessmentResult] = {}
     if isinstance(report, CaptureAssessmentReport):
         if acquisition_health is not None:
             raise ComparisonError("captured assessments cannot use acquisition health")
         sources = _capture_sources(report, correlation)
+        assert correlation is not None
+        expected = {
+            item.id: item for item in assess_correlation(correlation).assessments
+        }
     else:
-        if correlation is not None:
+        if correlation is not None or capture_health is not None:
             raise ComparisonError("fresh rechecks cannot use a correlation projection")
         acquisitions = {item.id: item for item in report.acquisitions}
 
@@ -135,23 +279,77 @@ def _build_side(
 
         grouped: dict[str | None, list[EvidenceUse]] = {}
         observed_at: dict[str | None, list[datetime]] = {}
-        health: dict[str | None, tuple[bool, str | None]] = {}
+        health: dict[str | None, dict[str, tuple[bool, str | None]]] = {}
+        windows: dict[str | None, list[tuple[datetime, datetime] | None]] = {}
+        valid: dict[str | None, bool] = {}
+        known_rule = (
+            assessment.claim.rule_version == "1"
+            and assessment.claim.resource
+            == {
+                DIRECTORY_RULE: "/",
+                GIT_CONFIG_RULE: "/.git/config",
+                HSTS_RULE: "/",
+            }.get(assessment.claim.rule_id)
+        )
         for use in assessment.evidence_used:
             address: str | None = None
             healthy = True
             reason = None
+            window = None
+            digest = ""
+            semantics_valid = known_rule
             if isinstance(use, ExistingCaptureUse):
                 source = sources[use.source.run_id]
-                target = source.context.web_target
-                if target is not None and len(target.approved_addresses) == 1:
-                    address = target.approved_addresses[0]
-                healthy, reason = _evidence_health(source, use)
+                address = _capture_address(source, use)
+                healthy, reason = _evidence_health(source, use, capture_health)
                 captured_at = use.evidence.captured_at
+                digest = use.evidence.artifact_sha256
+                semantics_valid &= _same_assessment_evidence(
+                    assessment, expected.get(assessment.id)
+                )
+                if (
+                    source.kind == "scan"
+                    and source.finished_at is not None
+                    and source.finished_at >= source.created_at
+                ):
+                    window = (source.created_at, source.finished_at)
+                elif source.kind == "import":
+                    originals = [
+                        original
+                        for original in sources.values()
+                        if original.kind == "scan"
+                        and original.context.web_target == source.context.web_target
+                        and original.report.evidence.scanner == use.evidence.scanner
+                        and original.report.evidence.artifact_sha256 == digest
+                    ]
+                    addresses = {
+                        _capture_address(original, use) for original in originals
+                    }
+                    if len(addresses) == 1 and None not in addresses:
+                        address = next(iter(addresses))
+                        intervals = [
+                            (original.created_at, original.finished_at)
+                            for original in originals
+                            if original.finished_at is not None
+                            and original.finished_at >= original.created_at
+                        ]
+                        if intervals and len(intervals) == len(originals):
+                            window = (
+                                min(start for start, _ in intervals),
+                                max(end for _, end in intervals),
+                            )
             elif isinstance(use, FreshRecheckUse):
                 acquisition = acquisitions[use.acquisition_id]
                 address = acquisition.approved_address
                 captured_at = acquisition.started_at
+                semantics_valid &= _fresh_context_valid(assessment, acquisition, use)
+                if (
+                    acquisition.finished_at is not None
+                    and acquisition.finished_at >= acquisition.started_at
+                ):
+                    window = (acquisition.started_at, acquisition.finished_at)
                 if acquisition.evidence is not None:
+                    digest = acquisition.evidence.artifact_sha256
                     recorded = (
                         acquisition_health.get(acquisition.id)
                         if acquisition_health is not None
@@ -167,30 +365,54 @@ def _build_side(
                     )
             grouped.setdefault(address, []).append(use)
             observed_at.setdefault(address, []).append(captured_at)
-            prior = health.get(address, (True, None))
-            health[address] = (
-                prior[0] and healthy,
-                prior[1] or reason,
-            )
+            windows.setdefault(address, []).append(window)
+            valid[address] = valid.get(address, True) and semantics_valid
+            copies = health.setdefault(address, {})
+            prior = copies.get(digest)
+            # One readable identical copy suffices; duplicate imports are not corroboration.
+            if prior is None or healthy:
+                copies[digest] = (healthy, reason)
         if not grouped:
             grouped[None] = []
             observed_at[None] = []
-            health[None] = (False, "assessment_has_no_evidence_context")
+            health[None] = {"": (False, "assessment_has_no_evidence_context")}
+            windows[None] = []
+            valid[None] = False
 
         for address, uses in grouped.items():
             key = (*semantic, address)
             if key in entries:
                 raise ComparisonError("one selection contains duplicate claim context")
-            is_healthy, reason = health[address]
+            failures = sorted(
+                reason or "required_evidence_unavailable"
+                for healthy, reason in health[address].values()
+                if not healthy
+            )
+            complete_windows = [
+                window for window in windows[address] if window is not None
+            ]
+            timing_known = bool(complete_windows) and len(complete_windows) == len(
+                windows[address]
+            )
             entries[key] = _Entry(
                 assessment=assessment,
                 address=address,
                 evidence=tuple(uses),
-                observed_at=tuple(sorted(observed_at[address])),
-                healthy=is_healthy,
-                health_reason=reason,
+                observed_at=tuple(sorted(set(observed_at[address]))),
+                healthy=not failures,
+                health_reason=failures[0] if failures else None,
+                semantics_valid=valid[address],
+                started_at=min(window[0] for window in complete_windows)
+                if timing_known
+                else None,
+                finished_at=max(window[1] for window in complete_windows)
+                if timing_known
+                else None,
+                artifact_digests=frozenset(
+                    digest for digest in health[address] if digest
+                ),
             )
-    return _Side(report=report, entries=entries, selection=_selection(report))
+    return _Side(entries=entries, selection=_selection(report))
 
 
 def _reference(entry: _Entry | None) -> AssessmentReference | None:
@@ -204,6 +426,8 @@ def _reference(entry: _Entry | None) -> AssessmentReference | None:
         reason=assessment.reason,
         evidence_health="ready" if entry.healthy else "unavailable",
         observed_at=entry.observed_at,
+        acquisition_started_at=entry.started_at,
+        acquisition_finished_at=entry.finished_at,
         evidence_used=entry.evidence,
     )
 
@@ -219,14 +443,19 @@ def _facts(entry: _Entry) -> dict[str, frozenset[str]]:
     for use in entry.evidence:
         for fact in use.facts:
             if fact.key in _MATERIAL_FACTS:
-                values.setdefault(fact.key, set()).add(str(fact.value))
+                values.setdefault(fact.key, set()).add(str(fact.value).strip(" \t"))
     return {key: frozenset(items) for key, items in values.items()}
 
 
 def _material_facts_changed(baseline: _Entry, current: _Entry) -> bool:
     before = _facts(baseline)
     after = _facts(current)
-    return bool(before) and before.keys() == after.keys() and before != after
+    return (
+        baseline.assessment.claim.rule_id == HSTS_RULE
+        and bool(before)
+        and before.keys() == after.keys()
+        and before != after
+    )
 
 
 def _template_revisions(entry: _Entry) -> set[str]:
@@ -254,7 +483,9 @@ def _compatible(baseline: _Entry, current: _Entry) -> bool:
     expected_revision = _reviewed_revision(baseline.assessment.claim.rule_id)
     revisions = _template_revisions(baseline) | _template_revisions(current)
     return (
-        baseline.assessment.claim.rule_id == current.assessment.claim.rule_id
+        baseline.semantics_valid
+        and current.semantics_valid
+        and baseline.assessment.claim.rule_id == current.assessment.claim.rule_id
         and baseline.assessment.claim.rule_version
         == current.assessment.claim.rule_version
         and baseline.assessment.claim.origin == current.assessment.claim.origin
@@ -267,9 +498,10 @@ def _compatible(baseline: _Entry, current: _Entry) -> bool:
 
 def _is_later(baseline: _Entry, current: _Entry) -> bool:
     return (
-        bool(baseline.observed_at)
-        and bool(current.observed_at)
-        and min(current.observed_at) > max(baseline.observed_at)
+        baseline.finished_at is not None
+        and current.started_at is not None
+        and current.started_at > baseline.finished_at
+        and baseline.artifact_digests.isdisjoint(current.artifact_digests)
     )
 
 
@@ -287,6 +519,7 @@ def _result(
     limitations = (
         "Historical state applies only to this exact claim, resource, and address context.",
         "Resolved does not establish remediation, root-cause removal, or safety elsewhere.",
+        "Artifact health describes verification for this comparison, not historical file availability.",
     )
 
     if baseline is not None and not baseline.healthy:
@@ -296,6 +529,14 @@ def _result(
             "unusable",
             baseline.health_reason or "required_evidence_unavailable",
             "Missing or corrupt baseline evidence prevents a historical conclusion.",
+        )
+    elif current is None and address is None:
+        state, reason = "unknown", "backend_context_unavailable"
+        explanation = "The baseline evidence does not identify a comparable backend."
+        coverage = _coverage(
+            "unusable",
+            reason,
+            "Configured authorization addresses do not establish response provenance.",
         )
     elif current is None:
         state, reason = "not_observed", "current_check_not_selected"
@@ -317,6 +558,14 @@ def _result(
             current.health_reason or "required_evidence_unavailable",
             "Missing or corrupt required evidence cannot support historical absence.",
         )
+    elif not current.semantics_valid:
+        state, reason = "unknown", "incompatible_check_semantics"
+        explanation = "The assessment does not match the reviewed rule or its acquisition evidence."
+        coverage = _coverage(
+            "unusable",
+            reason,
+            "The current check context is inconsistent or unreviewed.",
+        )
     elif baseline is None:
         if current.assessment.outcome == "supported_positive":
             state, reason = "new", "no_comparable_baseline_support"
@@ -330,7 +579,8 @@ def _result(
             "The baseline selection did not assess this exact check context.",
         )
     elif (
-        current.assessment.outcome == "supported_positive"
+        current.semantics_valid
+        and current.assessment.outcome == "supported_positive"
         and baseline.assessment.outcome != "supported_positive"
         and not _compatible(baseline, current)
     ):
@@ -341,17 +591,7 @@ def _result(
             "incompatible_baseline_semantics",
             "The baseline cannot establish when the currently supported condition began.",
         )
-    elif not _compatible(baseline, current):
-        state, reason = "unknown", "incompatible_check_semantics"
-        explanation = (
-            "The rule version or backend context is not semantically comparable."
-        )
-        coverage = _coverage(
-            "unusable",
-            "incompatible_check_semantics",
-            "Exact rule versions and address contexts are required for comparison.",
-        )
-    elif current.assessment.outcome == "inconclusive":
+    elif current.semantics_valid and current.assessment.outcome == "inconclusive":
         if current.assessment.reason in _NOT_OBSERVED_REASONS:
             state, reason = "not_observed", "current_check_not_completed"
             explanation = "The current selection did not produce usable evidence for this condition."
@@ -368,6 +608,16 @@ def _result(
                 current.assessment.reason,
                 "Failed, interrupted, malformed, incomplete, or blocked checks cannot prove absence.",
             )
+    elif not _compatible(baseline, current):
+        state, reason = "unknown", "incompatible_check_semantics"
+        explanation = (
+            "The reviewed check semantics or backend context are not comparable."
+        )
+        coverage = _coverage(
+            "unusable",
+            reason,
+            "Reviewed rule/template/matcher semantics and an acquisition-bound address are required.",
+        )
     elif baseline.assessment.outcome == "inconclusive":
         if current.assessment.outcome == "supported_positive":
             state, reason = "new", "baseline_support_absent"
@@ -390,18 +640,28 @@ def _result(
             "exact_check_covered",
             "The exact rule version, origin, resource, address, and required evidence are comparable.",
         )
-        if before == "supported_positive" and after == "supported_negative":
-            if _is_later(baseline, current):
-                state, reason = "resolved", "comparable_negative_evidence"
-                explanation = "The previously supported condition was absent in this later comparable assessment."
-            else:
-                state, reason = "unknown", "current_evidence_not_later"
-                explanation = "The negative evidence was not captured after all baseline evidence."
-                coverage = _coverage(
-                    "unusable",
-                    "current_evidence_not_later",
-                    "Resolution requires a later comparable negative acquisition.",
-                )
+        same_capture = (
+            bool(baseline.artifact_digests)
+            and baseline.artifact_digests == current.artifact_digests
+        )
+        if (
+            same_capture
+            and before == after
+            and not _material_facts_changed(baseline, current)
+        ):
+            state, reason = "unchanged", "same_capture_no_new_acquisition"
+            explanation = "The selected evidence supports the same conclusion; duplicate bytes establish no new acquisition."
+        elif not _is_later(baseline, current):
+            state, reason = "unknown", "current_evidence_not_later"
+            explanation = "Distinct current evidence could not be placed after completion of all baseline acquisitions."
+            coverage = _coverage(
+                "unusable",
+                reason,
+                "Comparison requires non-overlapping acquisition timing, not scanner event or import timestamps.",
+            )
+        elif before == "supported_positive" and after == "supported_negative":
+            state, reason = "resolved", "comparable_negative_evidence"
+            explanation = "The previously supported condition was absent in this later comparable assessment."
         elif before == "supported_negative" and after == "supported_positive":
             state, reason = "new", "condition_now_supported"
             explanation = (
@@ -411,7 +671,7 @@ def _result(
             baseline, current
         ):
             state, reason = "changed", "material_evidence_changed"
-            explanation = "The condition remains supported, but comparable material evidence changed."
+            explanation = "Both responses contained HSTS; the set of captured header values differed. This does not evaluate policy strength."
         else:
             state, reason = "unchanged", "supported_conclusion_unchanged"
             explanation = "The comparable supported conclusion did not change."
@@ -437,14 +697,25 @@ def compare_assessments(
     current_correlation: CorrelationResult | None = None,
     baseline_acquisition_health: Mapping[UUID, ArtifactHealth] | None = None,
     current_acquisition_health: Mapping[UUID, ArtifactHealth] | None = None,
+    baseline_capture_health: CaptureHealth | None = None,
+    current_capture_health: CaptureHealth | None = None,
 ) -> HistoricalComparisonReport:
+    """Compare M9 results using health maps from current artifact verification."""
     if baseline.project_id != current.project_id:
         raise ComparisonError("baseline and current selections must use one project")
     baseline_side = _build_side(
-        baseline, baseline_correlation, baseline_acquisition_health
+        baseline,
+        baseline_correlation,
+        baseline_acquisition_health,
+        baseline_capture_health,
     )
-    current_side = _build_side(current, current_correlation, current_acquisition_health)
-    keys = sorted(set(baseline_side.entries) | set(current_side.entries))
+    current_side = _build_side(
+        current, current_correlation, current_acquisition_health, current_capture_health
+    )
+    keys = sorted(
+        set(baseline_side.entries) | set(current_side.entries),
+        key=lambda key: (*key[:3], key[3] or ""),
+    )
     return HistoricalComparisonReport(
         project_id=baseline.project_id,
         baseline=baseline_side.selection,

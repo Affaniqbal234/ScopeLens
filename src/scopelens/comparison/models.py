@@ -41,6 +41,8 @@ class AssessmentReference(DomainModel):
     reason: Text
     evidence_health: Literal["ready", "unavailable"]
     observed_at: tuple[AwareDatetime, ...]
+    acquisition_started_at: AwareDatetime | None = None
+    acquisition_finished_at: AwareDatetime | None = None
     evidence_used: tuple[EvidenceUse, ...]
 
 

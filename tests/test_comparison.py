@@ -2,6 +2,7 @@ import socket
 import subprocess
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from pathlib import Path
 from typing import Literal
 from unittest.mock import Mock
 from uuid import UUID
@@ -14,19 +15,15 @@ from scopelens.analysis.correlation import correlate
 from scopelens.analysis.models import (
     CorrelationResult,
     RunSource,
-    SourceReference,
     StoredArtifact,
 )
 from scopelens.assessment.capture import assess_correlation
 from scopelens.assessment.models import (
     AcquisitionEvidence,
     AcquisitionStatus,
-    AssessmentResult,
     CaptureAssessmentReport,
     CapturedResponse,
-    EvidenceFact,
     ExistingCaptureUse,
-    Prerequisite,
     RecheckAcquisition,
     RecheckReport,
     assessment_id,
@@ -37,7 +34,7 @@ from scopelens.assessment.rules import (
     HSTS_RULE,
     CapturedExchange,
     assess_exposure_recheck,
-    hsts_claim,
+    assess_hsts_recheck,
 )
 from scopelens.comparison.compare import (
     ArtifactHealth,
@@ -92,6 +89,22 @@ def compare_assessments(
         current_correlation=current_correlation,
         baseline_acquisition_health=baseline_health,
         current_acquisition_health=current_health,
+        baseline_capture_health={
+            (source.run_id, artifact.sha256): artifact.recorded_health
+            for source in baseline_correlation.sources
+            for artifact in source.artifacts
+            if artifact.role == "stdout"
+        }
+        if baseline_correlation is not None
+        else None,
+        current_capture_health={
+            (source.run_id, artifact.sha256): artifact.recorded_health
+            for source in current_correlation.sources
+            for artifact in source.artifacts
+            if artifact.role == "stdout"
+        }
+        if current_correlation is not None
+        else None,
     )
 
 
@@ -126,6 +139,7 @@ def exchange(
         RecheckAcquisition(
             id=UUID(int=number),
             started_at=NOW + timedelta(seconds=number),
+            finished_at=NOW + timedelta(seconds=number, milliseconds=100),
             origin=origin,
             approved_address=address,
             resource=resource,
@@ -185,6 +199,7 @@ def nuclei_projection(
     address: str = "127.0.0.1",
     origin: str = ORIGIN,
     health: Literal["ready", "missing", "corrupt"] = "ready",
+    kind: Literal["scan", "import"] = "scan",
 ) -> tuple[CorrelationResult, CaptureAssessmentReport]:
     template = reviewed_templates()[0]
     digest = sha256(b"artifact").hexdigest()
@@ -217,8 +232,9 @@ def nuclei_projection(
         RunSource(
             run_id=UUID(int=number),
             project_id="lab",
-            kind="import",
+            kind=kind,
             created_at=NOW,
+            finished_at=NOW + timedelta(milliseconds=100),
             scope_snapshot_id="c" * 64,
             profile=ScanProfile(id="web"),
             context=ImportContext(
@@ -524,8 +540,9 @@ def stored_hsts(
     source = RunSource(
         run_id=UUID(int=run_number),
         project_id="lab",
-        kind="import",
-        created_at=NOW,
+        kind="scan",
+        created_at=NOW + timedelta(seconds=run_number),
+        finished_at=NOW + timedelta(seconds=run_number, milliseconds=100),
         scope_snapshot_id="c" * 64,
         profile=ScanProfile(id="web"),
         context=ImportContext(
@@ -543,6 +560,24 @@ def stored_hsts(
                     value=value,
                     evidence=(evidence,),
                 ),
+                Observation(
+                    subject=HttpEndpoint(origin=ORIGIN),
+                    key="http.probe_succeeded",
+                    value=True,
+                    evidence=(evidence,),
+                ),
+                Observation(
+                    subject=HttpEndpoint(origin=ORIGIN),
+                    key="http.status_code",
+                    value=200,
+                    evidence=(evidence,),
+                ),
+                Observation(
+                    subject=HttpEndpoint(origin=ORIGIN),
+                    key="http.peer_address",
+                    value="127.0.0.1",
+                    evidence=(evidence,),
+                ),
             ),
             matches=(),
         ),
@@ -557,34 +592,7 @@ def stored_hsts(
         ),
     )
     projection = correlate("lab", (source,))
-    claim = hsts_claim(ORIGIN)
-    assessment = AssessmentResult(
-        id=assessment_id("lab", claim),
-        claim=claim,
-        prerequisites=(
-            Prerequisite(id="https_origin", state="met", explanation="HTTPS."),
-        ),
-        outcome="supported_positive",
-        reason="hsts_header_observed",
-        explanation="The header was observed.",
-        evidence_used=(
-            ExistingCaptureUse(
-                source=SourceReference(
-                    run_id=source.run_id, section="observations", ordinal=0
-                ),
-                evidence=evidence,
-                facts=(
-                    EvidenceFact(
-                        key="http.header.strict_transport_security", value=value
-                    ),
-                ),
-            ),
-        ),
-        limitations=("Header presence only.",),
-    )
-    return projection, CaptureAssessmentReport(
-        project_id="lab", run_ids=(source.run_id,), assessments=(assessment,)
-    )
+    return projection, assess_correlation(projection)
 
 
 def test_material_hsts_header_change_is_changed_without_policy_claim() -> None:
@@ -598,7 +606,7 @@ def test_material_hsts_header_change_is_changed_without_policy_claim() -> None:
     )
     item = next(item for item in result.results if item.claim.rule_id == HSTS_RULE)
     assert item.state == "changed"
-    assert "policy" not in item.explanation.lower()
+    assert "does not evaluate policy strength" in item.explanation
 
 
 def test_different_evidence_representation_alone_is_not_changed() -> None:
@@ -699,3 +707,545 @@ def test_stored_comparison_rechecks_artifact_bytes(
     assert all(item.state != "resolved" for item in result.results)
     assert state(result) == "unknown"
     assert missing.read.call_count == 2
+
+
+def test_import_authorization_is_not_observed_backend_or_acquisition_time() -> None:
+    projection, baseline = nuclei_projection(
+        run_numbers=(1,), positive=True, kind="import"
+    )
+    result = compare_assessments(
+        baseline,
+        fresh_report(number=2, status_code=404),
+        baseline_correlation=projection,
+    )
+    assert all(item.state != "resolved" for item in result.results)
+
+
+def test_unknown_and_known_backend_contexts_can_coexist() -> None:
+    projection, baseline = nuclei_projection(run_numbers=(1,), positive=True)
+    source = projection.sources[0]
+    source = source.model_copy(
+        update={
+            "context": source.context.model_copy(
+                update={
+                    "web_target": WebTarget(
+                        origin=ORIGIN, approved_addresses=("127.0.0.1", "127.0.0.2")
+                    )
+                }
+            )
+        }
+    )
+    projection = correlate("lab", (source,))
+    result = compare_assessments(
+        baseline,
+        fresh_report(number=2, status_code=404),
+        baseline_correlation=projection,
+    )
+    assert all(item.state != "resolved" for item in result.results)
+
+
+def test_negative_assessment_cannot_borrow_another_resources_acquisition() -> None:
+    current = fresh_report(number=2, status_code=404)
+    acquisition = current.acquisitions[0].model_copy(update={"resource": "/other"})
+    current = current.model_copy(update={"acquisitions": (acquisition,)})
+    result = compare_assessments(fresh_report(number=1, positive=True), current)
+    assert state(result) == "unknown"
+
+
+def test_failed_acquisition_cannot_carry_a_supported_negative_assessment() -> None:
+    current = fresh_report(number=2, status_code=404)
+    failed = exchange(number=2, status="timeout").acquisition
+    current = current.model_copy(update={"acquisitions": (failed,)})
+    result = compare_assessments(fresh_report(number=1, positive=True), current)
+    assert state(result) == "unknown"
+
+
+def test_unknown_equal_rule_versions_do_not_inherit_current_semantics() -> None:
+    result = compare_assessments(
+        fresh_report(number=1, positive=True, rule_version="unreviewed"),
+        fresh_report(number=2, status_code=404, rule_version="unreviewed"),
+    )
+    assert state(result) == "unknown"
+
+
+@pytest.mark.parametrize("finish", [None, NOW + timedelta(seconds=3)])
+def test_missing_completion_or_overlapping_acquisitions_cannot_resolve(
+    finish: datetime | None,
+) -> None:
+    baseline = fresh_report(number=1, positive=True)
+    acquisition = baseline.acquisitions[0].model_copy(update={"finished_at": finish})
+    baseline = baseline.model_copy(update={"acquisitions": (acquisition,)})
+    result = compare_assessments(baseline, fresh_report(number=2, status_code=404))
+    assert state(result) == "unknown"
+    assert result.results[0].reason == "current_evidence_not_later"
+
+
+@pytest.mark.parametrize(
+    "scanner_time", [NOW - timedelta(days=365), NOW + timedelta(days=365)]
+)
+def test_scanner_event_timestamps_do_not_order_managed_acquisitions(
+    scanner_time: datetime,
+) -> None:
+    projection, _ = nuclei_projection(run_numbers=(1,), positive=True)
+    source = projection.sources[0]
+    match = source.report.matches[0]
+    match = match.model_copy(
+        update={
+            "evidence": tuple(
+                ref.model_copy(update={"captured_at": scanner_time})
+                for ref in match.evidence
+            )
+        }
+    )
+    source = source.model_copy(
+        update={"report": source.report.model_copy(update={"matches": (match,)})}
+    )
+    projection = correlate("lab", (source,))
+    result = compare_assessments(
+        assess_correlation(projection),
+        fresh_report(number=2, status_code=404),
+        baseline_correlation=projection,
+    )
+    assert state(result) == "resolved"
+    late_run = source.model_copy(update={"finished_at": NOW + timedelta(days=1)})
+    projection = correlate("lab", (late_run,))
+    result = compare_assessments(
+        assess_correlation(projection),
+        fresh_report(number=2, status_code=404),
+        baseline_correlation=projection,
+    )
+    assert state(result) == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("template_revision", "b" * 64),
+        ("matcher", "unreviewed"),
+        ("template_id", "unreviewed"),
+        ("matched_location", ORIGIN + "/other"),
+    ],
+)
+def test_nuclei_compatibility_requires_reviewed_matcher_revision_and_resource(
+    field: str, value: str
+) -> None:
+    projection, _ = nuclei_projection(run_numbers=(1,), positive=True)
+    source = projection.sources[0]
+    match = source.report.matches[0].model_copy(update={field: value})
+    source = source.model_copy(
+        update={"report": source.report.model_copy(update={"matches": (match,)})}
+    )
+    projection = correlate("lab", (source,))
+    result = compare_assessments(
+        assess_correlation(projection),
+        fresh_report(number=2, status_code=404),
+        baseline_correlation=projection,
+    )
+    assert all(item.state != "resolved" for item in result.results)
+
+
+@pytest.mark.parametrize("status_code", [302, 401, 403, 407, 429, 500])
+def test_redirect_auth_and_block_responses_do_not_resolve(status_code: int) -> None:
+    result = compare_assessments(
+        fresh_report(number=1, positive=True),
+        fresh_report(number=2, status_code=status_code),
+    )
+    assert state(result) == "unknown"
+
+
+def test_same_claim_on_another_resource_cannot_resolve() -> None:
+    current = fresh_report(number=2, status_code=404)
+    assessment = current.assessments[0]
+    claim = assessment.claim.model_copy(update={"resource": "/other"})
+    current = current.model_copy(
+        update={
+            "assessments": (
+                assessment.model_copy(
+                    update={"claim": claim, "id": assessment_id("lab", claim)}
+                ),
+            ),
+            "acquisitions": (
+                current.acquisitions[0].model_copy(update={"resource": "/other"}),
+            ),
+        }
+    )
+    result = compare_assessments(fresh_report(number=1, positive=True), current)
+    assert all(item.state != "resolved" for item in result.results)
+    assert (
+        next(item.state for item in result.results if item.claim.resource == "/")
+        == "not_observed"
+    )
+
+
+def test_closed_nmap_port_is_not_an_application_negative() -> None:
+    from scopelens.adapters.nmap import NmapAdapter
+
+    report = NmapAdapter().parse(
+        b'<nmaprun scanner="nmap" version="7.95" start="1"><host><status state="up"/><address addr="127.0.0.1" addrtype="ipv4"/><ports><port protocol="tcp" portid="443"><state state="closed"/></port></ports></host><runstats><finished time="2" exit="success"/></runstats></nmaprun>',
+        ImportContext(profile_id="local", profile_revision="1"),
+    )
+    template, _ = nuclei_projection(run_numbers=(2,), positive=False)
+    source = template.sources[0].model_copy(
+        update={
+            "report": report,
+            "context": ImportContext(profile_id="local", profile_revision="1"),
+            "artifacts": (),
+        }
+    )
+    projection = correlate("lab", (source,))
+    assert any(
+        observation.key == "service.state" and observation.value == "closed"
+        for observation in report.observations
+    )
+    result = compare_assessments(
+        fresh_report(number=1, positive=True),
+        assess_correlation(projection),
+        current_correlation=projection,
+    )
+    assert state(result) == "not_observed"
+
+
+def test_httpx_backend_is_taken_from_its_response_record() -> None:
+    first, _ = stored_hsts(run_number=1, value="max-age=60")
+    source = first.sources[0]
+    target = WebTarget(origin=ORIGIN, approved_addresses=("127.0.0.1", "127.0.0.2"))
+    source = source.model_copy(
+        update={"context": source.context.model_copy(update={"web_target": target})}
+    )
+    baseline = correlate("lab", (source,))
+    second, _ = stored_hsts(run_number=2, value="max-age=60")
+    source = second.sources[0]
+    observations = tuple(
+        item.model_copy(update={"value": "127.0.0.2"})
+        if item.key == "http.peer_address"
+        else item
+        for item in source.report.observations
+    )
+    source = source.model_copy(
+        update={
+            "context": source.context.model_copy(update={"web_target": target}),
+            "report": source.report.model_copy(update={"observations": observations}),
+        }
+    )
+    current = correlate("lab", (source,))
+    result = compare_assessments(
+        assess_correlation(baseline),
+        assess_correlation(current),
+        baseline_correlation=baseline,
+        current_correlation=current,
+    )
+    assert {item.claim.address for item in result.results} == {"127.0.0.1", "127.0.0.2"}
+    assert state(result, HSTS_RULE, "127.0.0.1") == "not_observed"
+    assert state(result, HSTS_RULE, "127.0.0.2") == "new"
+
+
+def test_import_dates_and_duplicate_copies_do_not_manufacture_progression() -> None:
+    first, _ = stored_hsts(run_number=1, value="max-age=60")
+    source = first.sources[0].model_copy(update={"kind": "import"})
+    baseline = correlate("lab", (source,))
+    copy = source.model_copy(
+        update={
+            "run_id": UUID(int=2),
+            "created_at": NOW + timedelta(days=365),
+            "finished_at": NOW + timedelta(days=366),
+        }
+    )
+    current = correlate("lab", (copy, source))
+    result = compare_assessments(
+        assess_correlation(baseline),
+        assess_correlation(current),
+        baseline_correlation=baseline,
+        current_correlation=current,
+    )
+    assert state(result, HSTS_RULE) == "unchanged"
+    assert result.results[0].reason == "same_capture_no_new_acquisition"
+    reordered = correlate("lab", (source, copy))
+    second = compare_assessments(
+        assess_correlation(baseline),
+        assess_correlation(reordered),
+        baseline_correlation=baseline,
+        current_correlation=reordered,
+    )
+    assert result == second
+
+
+def test_duplicate_missing_copy_does_not_discard_a_healthy_identical_copy() -> None:
+    projection, _ = nuclei_projection(run_numbers=(1, 2), positive=True)
+    first, copy = projection.sources
+    copy = copy.model_copy(
+        update={
+            "artifacts": tuple(
+                item.model_copy(update={"recorded_health": "missing"})
+                for item in copy.artifacts
+            )
+        }
+    )
+    projection = correlate("lab", (first, copy))
+    result = compare_assessments(
+        assess_correlation(projection),
+        fresh_report(number=3, status_code=404),
+        baseline_correlation=projection,
+    )
+    assert state(result) == "resolved"
+
+
+def test_stale_recorded_capture_health_does_not_establish_resolution() -> None:
+    projection, baseline = nuclei_projection(run_numbers=(1,), positive=True)
+    current = fresh_report(number=2, status_code=404)
+    result = compare_reports(
+        baseline,
+        current,
+        baseline_correlation=projection,
+        current_acquisition_health={UUID(int=2): "ready"},
+    )
+    assert state(result) == "unknown"
+    assert result.results[0].coverage.reason == "capture_evidence_health_unverified"
+
+
+def test_evidence_fact_order_and_presentation_do_not_change_identity_or_state() -> None:
+    projection, baseline = nuclei_projection(run_numbers=(1, 2), positive=True)
+    current = fresh_report(number=3, status_code=404)
+    expected = compare_assessments(baseline, current, baseline_correlation=projection)
+    changed = tuple(
+        item.model_copy(
+            update={
+                "evidence_used": tuple(
+                    use.model_copy(update={"facts": tuple(reversed(use.facts))})
+                    for use in reversed(item.evidence_used)
+                ),
+                "explanation": "Different presentation.",
+                "claim": item.claim.model_copy(
+                    update={"statement": "Different wording."}
+                ),
+            }
+        )
+        for item in reversed(baseline.assessments)
+    )
+    baseline = baseline.model_copy(update={"assessments": changed})
+    result = compare_assessments(baseline, current, baseline_correlation=projection)
+    assert [(item.id, item.state) for item in result.results] == [
+        (item.id, item.state) for item in expected.results
+    ]
+
+
+def test_header_outer_whitespace_does_not_create_changed() -> None:
+    first, baseline = stored_hsts(run_number=1, value="max-age=60")
+    second, current = stored_hsts(run_number=2, value=" \tmax-age=60\t ")
+    result = compare_assessments(
+        baseline, current, baseline_correlation=first, current_correlation=second
+    )
+    assert state(result, HSTS_RULE) == "unchanged"
+
+
+@pytest.mark.parametrize(
+    "damage", ["missing", "digest", "traversal", "symlink", "directory_link"]
+)
+def test_comparison_checks_real_artifacts_without_rewriting_health(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
+) -> None:
+    import sys
+
+    from scopelens.storage import correlation as storage
+    from scopelens.storage.artifacts import ArtifactStore
+
+    if sys.platform != "linux":
+        pytest.skip("private artifacts require Linux")
+    store = ArtifactStore(tmp_path / "private")
+    sources = []
+    for number, positive in ((1, True), (2, False)):
+        projection, _ = nuclei_projection(run_numbers=(number,), positive=positive)
+        source = projection.sources[0]
+        relative, digest, size = store.publish(
+            source.run_id, "stdout.jsonl", b"artifact"
+        )
+        sources.append(
+            source.model_copy(
+                update={
+                    "artifacts": (
+                        StoredArtifact(
+                            role="stdout",
+                            relative_path=relative,
+                            sha256=digest,
+                            size_bytes=size,
+                            recorded_health="ready",
+                        ),
+                    )
+                }
+            )
+        )
+    baseline = sources[0]
+    artifact = baseline.artifacts[0]
+    path = store.path(artifact.relative_path)
+    if damage == "missing":
+        path.unlink()
+    elif damage == "digest":
+        path.write_bytes(b"tampered")
+    elif damage == "traversal":
+        sources[0] = baseline.model_copy(
+            update={
+                "artifacts": (
+                    artifact.model_copy(update={"relative_path": "../outside"}),
+                )
+            }
+        )
+    elif damage == "symlink":
+        path.unlink()
+        path.symlink_to(store.path(sources[1].artifacts[0].relative_path))
+    else:
+        moved = store.root / "moved"
+        path.parent.rename(moved)
+        path.parent.symlink_to(moved, target_is_directory=True)
+    combined = correlate("lab", sources)
+    before = combined.model_dump_json()
+    monkeypatch.setattr(storage, "correlate_history", Mock(return_value=combined))
+    engine = Mock()
+    result = storage.compare_history(engine, store, "lab", [UUID(int=1)], [UUID(int=2)])
+    assert state(result) == "unknown"
+    assert all(item.state != "resolved" for item in result.results)
+    assert combined.model_dump_json() == before
+    assert engine.mock_calls == []
+
+
+def test_reimporting_a_managed_capture_does_not_change_its_context_or_timing() -> None:
+    projection, baseline = nuclei_projection(run_numbers=(1,), positive=True)
+    source = projection.sources[0]
+    imported = source.model_copy(
+        update={
+            "kind": "import",
+            "run_id": UUID(int=2),
+            "created_at": NOW + timedelta(days=30),
+            "finished_at": NOW + timedelta(days=31),
+        }
+    )
+    repeated = correlate("lab", (source, imported))
+    current = fresh_report(number=3, status_code=404)
+    first = compare_assessments(baseline, current, baseline_correlation=projection)
+    second = compare_assessments(
+        assess_correlation(repeated), current, baseline_correlation=repeated
+    )
+    assert [(item.id, item.state) for item in first.results] == [
+        (item.id, item.state) for item in second.results
+    ]
+    assert state(second) == "resolved"
+
+
+def test_failed_httpx_attempt_keeps_target_context_without_claiming_a_peer() -> None:
+    baseline_projection, baseline = stored_hsts(run_number=1, value="max-age=60")
+    current_projection, _ = stored_hsts(run_number=2, value="max-age=60")
+    source = current_projection.sources[0]
+    reference = source.report.evidence
+    observations = (
+        Observation(
+            subject=HttpEndpoint(origin=ORIGIN),
+            key="http.probe_succeeded",
+            value=False,
+            evidence=(reference,),
+        ),
+        Observation(
+            subject=HttpEndpoint(origin=ORIGIN),
+            key="http.target_address",
+            value="127.0.0.1",
+            evidence=(reference,),
+        ),
+    )
+    source = source.model_copy(
+        update={
+            "report": source.report.model_copy(update={"observations": observations})
+        }
+    )
+    current_projection = correlate("lab", (source,))
+    result = compare_assessments(
+        baseline,
+        assess_correlation(current_projection),
+        baseline_correlation=baseline_projection,
+        current_correlation=current_projection,
+    )
+    assert state(result, HSTS_RULE) == "unknown"
+    assert result.results[0].coverage.reason == "header_capture_incomplete"
+
+
+@pytest.mark.parametrize("complete_headers", [True, False])
+def test_hsts_resolution_requires_headers_but_not_an_entire_body(
+    complete_headers: bool,
+) -> None:
+    first = exchange(number=1)
+    assert first.acquisition.response is not None
+    acquisition = first.acquisition.model_copy(
+        update={
+            "response": first.acquisition.response.model_copy(
+                update={"strict_transport_security_present": True}
+            )
+        }
+    )
+    first = CapturedExchange(acquisition, first.body)
+    second = exchange(number=2, status="truncated")
+    assert second.acquisition.response is not None
+    second = CapturedExchange(
+        second.acquisition.model_copy(
+            update={
+                "response": second.acquisition.response.model_copy(
+                    update={"headers_complete": complete_headers}
+                )
+            }
+        ),
+        second.body,
+    )
+    baseline = RecheckReport(
+        project_id="lab",
+        acquisitions=(first.acquisition,),
+        assessments=(assess_hsts_recheck("lab", first),),
+    )
+    current = RecheckReport(
+        project_id="lab",
+        acquisitions=(second.acquisition,),
+        assessments=(assess_hsts_recheck("lab", second),),
+    )
+    result = compare_assessments(baseline, current)
+    assert state(result, HSTS_RULE) == ("resolved" if complete_headers else "unknown")
+
+
+@pytest.mark.parametrize(
+    "body", [b"<title>Access denied</title>", b"<input type='password'>", b"captcha"]
+)
+def test_ambiguous_200_bodies_are_not_historical_negatives(body: bytes) -> None:
+    capture = exchange(number=2, body=body)
+    current = RecheckReport(
+        project_id="lab",
+        acquisitions=(capture.acquisition,),
+        assessments=(assess_exposure_recheck("lab", DIRECTORY_RULE, capture),),
+    )
+    result = compare_assessments(fresh_report(number=1, positive=True), current)
+    assert state(result) == "unknown"
+
+
+def test_missing_prerequisites_cannot_resolve() -> None:
+    current = fresh_report(number=2, status_code=404)
+    assessment = current.assessments[0]
+    current = current.model_copy(
+        update={
+            "assessments": (
+                assessment.model_copy(
+                    update={"prerequisites": assessment.prerequisites[:1]}
+                ),
+            )
+        }
+    )
+    assert (
+        state(compare_assessments(fresh_report(number=1, positive=True), current))
+        == "unknown"
+    )
+
+
+def test_timeout_cannot_be_presented_as_a_skipped_check() -> None:
+    current = fresh_report(number=2, status="timeout")
+    current = current.model_copy(
+        update={
+            "assessments": (
+                current.assessments[0].model_copy(update={"reason": "check_not_run"}),
+            )
+        }
+    )
+    assert (
+        state(compare_assessments(fresh_report(number=1, positive=True), current))
+        == "unknown"
+    )

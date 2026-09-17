@@ -1,6 +1,7 @@
 import os
 import stat
 import sys
+from contextlib import ExitStack
 from hashlib import sha256
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -13,13 +14,14 @@ class ArtifactError(ValueError):
 
 
 class ArtifactStore:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, create: bool = True) -> None:
         if sys.platform != "linux":
             raise ArtifactError(
                 "persistent artifacts require a Linux private filesystem"
             )
         self.root = root.absolute()
-        self._directory(self.root)
+        if create:
+            self._directory(self.root)
 
     @staticmethod
     def _directory(path: Path) -> None:
@@ -72,17 +74,31 @@ class ArtifactStore:
 
     def read(self, relative: str) -> bytes:
         path = self.path(relative)
-        self._directory(self.root)
-        if path.parent.resolve() != path.parent:
+        if self.root.resolve() != self.root:
             raise ArtifactError("linked artifact directory")
-        info = path.parent.lstat()
-        if (
-            not stat.S_ISDIR(info.st_mode)
-            or info.st_uid != os.geteuid()
-            or info.st_mode & 0o077
-        ):
-            raise ArtifactError("unsafe artifact directory")
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with ExitStack() as directories:
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            parent = os.open(self.root.anchor, flags)
+            directories.callback(os.close, parent)
+            # Resolve each directory through its open parent, never through a replaced link.
+            components = (*self.root.parts[1:], path.parent.name)
+            for index, component in enumerate(components):
+                parent = os.open(component, flags, dir_fd=parent)
+                directories.callback(os.close, parent)
+                if index >= len(components) - 2:
+                    info = os.fstat(parent)
+                    if (
+                        info.st_uid != os.geteuid()
+                        or info.st_mode & 0o077
+                        or (
+                            index == len(components) - 2
+                            and stat.S_IMODE(info.st_mode) != 0o700
+                        )
+                    ):
+                        raise ArtifactError("unsafe artifact directory")
+            descriptor = os.open(
+                path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent
+            )
         with os.fdopen(descriptor, "rb") as source:
             info = os.fstat(source.fileno())
             if (

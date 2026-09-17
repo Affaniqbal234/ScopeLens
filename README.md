@@ -326,6 +326,11 @@ Historical comparison reports `new`, `changed`, `unchanged`, `resolved`,
 backend context. Missing findings, omitted checks, failed checks, scope changes,
 unhealthy evidence, and responses from another address cannot establish resolution.
 The command reads the selected history without modifying it or choosing runs by date.
+Stored scanner reports cannot establish supported negatives, so this command cannot
+currently report `resolved`. The Python comparison interface also accepts fresh
+recheck reports, which are not yet persisted. Resolution requires verified artifacts
+and non-overlapping acquisition times; import dates and scanner timestamps do not
+establish that ordering.
 
 ## Development
 

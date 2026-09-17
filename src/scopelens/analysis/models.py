@@ -39,6 +39,7 @@ class RunSource(DomainModel):
     project_id: Identifier
     kind: Literal["scan", "import"]
     created_at: AwareDatetime
+    finished_at: AwareDatetime | None = None
     scope_snapshot_id: Digest
     profile: ScanProfile
     context: ImportContext

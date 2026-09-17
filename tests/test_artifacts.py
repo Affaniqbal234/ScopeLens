@@ -105,3 +105,34 @@ def test_artifact_path_containment(tmp_path: Path, relative: str) -> None:
     store = ArtifactStore(tmp_path / "private")
     with pytest.raises(ArtifactError):
         store.path(relative)
+
+
+@linux
+def test_read_only_store_does_not_create_a_missing_root(tmp_path: Path) -> None:
+    root = tmp_path / "missing"
+    store = ArtifactStore(root, create=False)
+    with pytest.raises(FileNotFoundError):
+        store.read(f"{uuid4()}/stdout.jsonl")
+    assert not root.exists()
+
+
+@linux
+def test_read_does_not_recreate_a_removed_root(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path / "private")
+    store.root.rmdir()
+    with pytest.raises(FileNotFoundError):
+        store.read(f"{uuid4()}/stdout.jsonl")
+    assert not store.root.exists()
+
+
+@linux
+def test_artifact_read_rejects_a_linked_parent(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path / "private")
+    run_id = uuid4()
+    relative, _, _ = store.publish(run_id, "stdout.xml", b"evidence")
+    directory = store.path(relative).parent
+    renamed = store.root / "moved"
+    directory.rename(renamed)
+    directory.symlink_to(renamed, target_is_directory=True)
+    with pytest.raises(OSError):
+        store.read(relative)

@@ -115,6 +115,7 @@ class CapturedResponse(DomainModel):
 class RecheckAcquisition(DomainModel):
     id: UUID
     started_at: AwareDatetime
+    finished_at: AwareDatetime | None = None
     origin: Origin
     approved_address: IPv4
     method: Literal["GET"] = "GET"
@@ -125,6 +126,8 @@ class RecheckAcquisition(DomainModel):
 
     @model_validator(mode="after")
     def consistent_result(self) -> Self:
+        if self.finished_at is not None and self.finished_at < self.started_at:
+            raise ValueError("acquisition completion precedes its start")
         if self.status == "complete":
             if self.response is None or self.evidence is None:
                 raise ValueError("complete acquisitions require response evidence")

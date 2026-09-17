@@ -115,7 +115,7 @@ def test_history_compare_requires_explicit_sides_and_is_read_only(
         engine, artifact_store, "lab", [UUID(int=1)], [UUID(int=2)]
     )
     engine.dispose.assert_called_once()
-    artifacts.assert_called_once_with(tmp_path)
+    artifacts.assert_called_once_with(tmp_path, create=False)
 
 
 @pytest.mark.parametrize(
