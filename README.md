@@ -280,6 +280,40 @@ names, contacting assessed systems, or running scanners. It computes the result
 in memory and does not modify history. Missing, repeated, incomplete, or
 cross-project run selections are rejected.
 
+## Evidence assessment
+
+Assess the evidence in selected stored runs without contacting a target:
+
+```sh
+uv run --locked scopelens history-assess --project local-lab --run-id 00000000-0000-4000-8000-000000000001
+```
+
+On Linux, run the fixed directory-listing, Git configuration, and HSTS rechecks
+against one approved origin and address:
+
+```sh
+uv run --locked scopelens recheck-web scope.local.toml --profile conservative --origin http://localhost:8000 --address 127.0.0.1
+```
+
+Assessment results are separate from stored scanner reports. Each result records
+its rule version, prerequisites, evidence source, outcome, reason, and limits.
+Existing captures and fresh rechecks use different source types. Rechecks issue
+only `GET /` and `GET /.git/config`, do not follow redirects, and retain bounded
+raw responses as private artifacts.
+
+A negative exposure result requires a complete usable response for the exact
+resource. Exposure checks treat timeouts, transport failures, malformed or truncated
+responses, recognized authentication or blocking responses, skipped checks, and
+empty Nuclei output as inconclusive. Rechecks require explicit HTTP body framing;
+close-delimited bodies, chunk extensions, and trailers are unsupported.
+The HSTS claim is header presence:
+positive means present, negative means absent from fully parsed headers of a usable
+HTTPS hostname response. Body truncation alone does not invalidate captured headers;
+malformed framing or an ambiguous response still prevents an HSTS conclusion.
+Stored httpx metadata can support presence, but cannot establish absence.
+The rule does not validate policy, TLS certificates, or browser behavior.
+Assessment does not assign historical resolved or changed states.
+
 ## Development
 
 ```sh

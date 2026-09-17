@@ -11,6 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from scopelens.adapters.base import ReportParseError
 from scopelens.analysis.correlation import CorrelationError
+from scopelens.assessment.capture import assess_correlation
 from scopelens.config import ConfigurationError, load_config
 from scopelens.domain.scope import ScopeViolation, WebTarget
 from scopelens.execution.httpx import HTTPX_EXECUTABLE
@@ -36,9 +37,14 @@ def run_history(args: argparse.Namespace, parser: argparse.ArgumentParser) -> No
             migrate(engine)
             print("History database migrated.")
             return
-        if args.command == "history-correlate":
+        if args.command in ("history-correlate", "history-assess"):
             result = correlate_history(engine, args.project, args.run_id)
-            print(result.model_dump_json(indent=2))
+            output = (
+                assess_correlation(result)
+                if args.command == "history-assess"
+                else result
+            )
+            print(output.model_dump_json(indent=2))
             return
         history = History(engine, ArtifactStore(args.artifacts))
         if args.command in ("history-import", "history-scan"):
@@ -94,18 +100,18 @@ def run_history(args: argparse.Namespace, parser: argparse.ArgumentParser) -> No
     except ValidationError:
         parser.error("invalid history input or stored domain data")
     except SQLAlchemyError:
-        if args.command == "history-correlate":
-            parser.error("database read failed; correlation did not modify history")
+        if args.command in ("history-correlate", "history-assess"):
+            parser.error("database read failed; analysis did not modify history")
         parser.error("database operation failed; retry or reconcile using the run ID")
     except OSError:
-        if args.command == "history-correlate":
-            parser.error("correlation output failed; history was not modified")
+        if args.command in ("history-correlate", "history-assess"):
+            parser.error("analysis output failed; history was not modified")
         parser.error(
             "artifact operation failed; retain files and reconcile using the run ID"
         )
     except KeyboardInterrupt:
-        if args.command == "history-correlate":
-            parser.exit(130, "correlation interrupted; history was not modified\n")
+        if args.command in ("history-correlate", "history-assess"):
+            parser.exit(130, "analysis interrupted; history was not modified\n")
         parser.exit(
             130, "operation interrupted; use history-reconcile before retrying\n"
         )
@@ -121,13 +127,14 @@ def add_commands(commands: argparse._SubParsersAction[argparse.ArgumentParser]) 
         ("history-list", "list a project's persisted runs"),
         ("history-show", "read a persisted normalized report"),
         ("history-correlate", "correlate explicitly selected stored runs as JSON"),
+        ("history-assess", "assess evidence from explicitly selected stored runs"),
         (
             "history-reconcile",
             "check artifact health and mark abandoned runs interrupted",
         ),
     ):
         command = commands.add_parser(name, help=help_text, allow_abbrev=False)
-        if name != "history-correlate":
+        if name not in ("history-correlate", "history-assess"):
             command.add_argument(
                 "--artifacts", type=Path, default=Path(".scopelens/history")
             )
@@ -148,9 +155,9 @@ def add_commands(commands: argparse._SubParsersAction[argparse.ArgumentParser]) 
         if name == "history-scan":
             command.add_argument("--httpx-binary", default=HTTPX_EXECUTABLE)
             command.add_argument("--nuclei-binary", default=NUCLEI_EXECUTABLE)
-        if name in ("history-list", "history-correlate"):
+        if name in ("history-list", "history-correlate", "history-assess"):
             command.add_argument("--project", required=True)
         if name == "history-show":
             command.add_argument("run_id", type=UUID)
-        if name == "history-correlate":
+        if name in ("history-correlate", "history-assess"):
             command.add_argument("--run-id", type=UUID, action="append", required=True)

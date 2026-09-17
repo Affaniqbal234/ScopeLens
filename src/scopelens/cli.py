@@ -18,6 +18,7 @@ from scopelens.adapters.nuclei_templates import (
     reviewed_templates,
     template_revision,
 )
+from scopelens.assessment.recheck import recheck_web
 from scopelens.config import ConfigurationError, load_config
 from scopelens.domain.scope import ScopeViolation, WebTarget
 from scopelens.execution.httpx import HTTPX_EXECUTABLE, scan_httpx
@@ -60,6 +61,16 @@ def main(argv: list[str] | None = None) -> None:
     commands.add_parser(
         "nuclei-templates", help="show the bundled reviewed template manifest"
     )
+    recheck = commands.add_parser(
+        "recheck-web",
+        help="run the fixed deterministic web rechecks on one approved origin",
+        allow_abbrev=False,
+    )
+    recheck.add_argument("config", type=Path)
+    recheck.add_argument("--profile", required=True)
+    recheck.add_argument("--origin", required=True)
+    recheck.add_argument("--address", required=True)
+    recheck.add_argument("--artifacts", type=Path, default=Path(".scopelens/artifacts"))
     for name, help_text in (
         ("import-httpx", "parse local httpx JSONL without scanning"),
         ("scan-httpx", "probe one authorized web origin on Linux"),
@@ -141,6 +152,29 @@ def main(argv: list[str] | None = None) -> None:
                 indent=2,
             )
         )
+    elif args.command == "recheck-web":
+        try:
+            target = WebTarget(origin=args.origin, approved_addresses=(args.address,))
+            recheck_result = asyncio.run(
+                recheck_web(
+                    load_config(args.config), args.profile, args.artifacts, target
+                )
+            )
+        except (
+            ConfigurationError,
+            ExecutionError,
+            ScopeViolation,
+        ) as exc:
+            if isinstance(exc, ExecutionError) and exc.artifacts is not None:
+                parser.error(f"{exc}; private artifacts: {str(exc.artifacts)!r}")
+            parser.error(str(exc))
+        except ValidationError:
+            parser.error("invalid web target or assessment data")
+        except KeyboardInterrupt:
+            parser.exit(
+                130, "recheck cancelled; any partial private artifacts were retained\n"
+            )
+        print(recheck_result.model_dump_json(indent=2))
     elif args.command in ("import-httpx", "scan-httpx", "import-nuclei", "scan-nuclei"):
         try:
             target = WebTarget(origin=args.origin, approved_addresses=(args.address,))

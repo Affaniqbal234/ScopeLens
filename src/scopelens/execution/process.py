@@ -29,7 +29,8 @@ def require_linux() -> None:
         )
 
 
-def _private_directory(root: Path, prefix: str = "nmap-") -> Path:
+def ensure_private_artifact_root(root: Path) -> Path:
+    root = root.absolute()
     try:
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         info = root.lstat()
@@ -43,6 +44,11 @@ def _private_directory(root: Path, prefix: str = "nmap-") -> Path:
         raise ExecutionError(
             "artifact root must be an owned, private directory (mode 0700)"
         )
+    return root
+
+
+def _private_directory(root: Path, prefix: str = "nmap-") -> Path:
+    root = ensure_private_artifact_root(root)
     try:
         return Path(tempfile.mkdtemp(prefix=prefix, dir=root))
     except OSError:
@@ -60,6 +66,24 @@ def _private_file(path: Path) -> IO[bytes]:
         raise ExecutionError(
             "cannot create a private artifact file", path.parent
         ) from None
+
+
+def write_private_artifact(
+    root: Path, *, prefix: str, filename: str, content: bytes, limit: int
+) -> Path:
+    require_linux()
+    if (
+        not filename
+        or Path(filename).name != filename
+        or not 0 <= len(content) <= limit <= 8 * 1024 * 1024
+    ):
+        raise ExecutionError("invalid private artifact")
+    directory = _private_directory(root.absolute(), prefix)
+    path = directory / filename
+    with _private_file(path) as destination:
+        if destination.write(content) != len(content):
+            raise ExecutionError("incomplete artifact write", directory)
+    return path
 
 
 async def _stop(process: asyncio.subprocess.Process) -> None:

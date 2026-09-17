@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
 from scopelens.analysis.correlation import CorrelationError, correlate
+from scopelens.assessment.capture import assess_correlation
 from scopelens.cli import main
 from scopelens.storage import cli
 from tests.test_correlation import match, source
@@ -44,6 +45,28 @@ def test_portable_cli_skips_artifacts_and_disposes_database(
     main(["history-correlate", "--project", "lab", "--run-id", str(UUID(int=1))])
     assert capsys.readouterr().out == result.model_dump_json(indent=2) + "\n"
     projection.assert_called_once_with(engine, "lab", [UUID(int=1)])
+    engine.dispose.assert_called_once()
+    artifacts.assert_not_called()
+
+
+def test_history_assess_is_read_only_and_uses_selected_projection(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    projection = correlate(
+        "lab", (source(matches=(match(template="scopelens-directory-listing"),)),)
+    )
+    expected = assess_correlation(projection)
+    engine = Mock()
+    correlate_call = Mock(return_value=projection)
+    artifacts = Mock(side_effect=AssertionError("artifact access"))
+    monkeypatch.setenv("SCOPELENS_DATABASE_URL", "test-only")
+    monkeypatch.setattr(cli, "database", Mock(return_value=engine))
+    monkeypatch.setattr(cli, "correlate_history", correlate_call)
+    monkeypatch.setattr(cli, "ArtifactStore", artifacts)
+    main(["history-assess", "--project", "lab", "--run-id", str(UUID(int=1))])
+    assert capsys.readouterr().out == expected.model_dump_json(indent=2) + "\n"
+    correlate_call.assert_called_once_with(engine, "lab", [UUID(int=1)])
     engine.dispose.assert_called_once()
     artifacts.assert_not_called()
 
