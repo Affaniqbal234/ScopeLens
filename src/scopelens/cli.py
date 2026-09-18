@@ -101,6 +101,18 @@ def main(argv: list[str] | None = None) -> None:
                 web.add_argument("--httpx-binary", default=HTTPX_EXECUTABLE)
     from scopelens.storage.cli import add_commands, run_assessment, run_history
 
+    api = commands.add_parser(
+        "api-serve",
+        help="serve the authenticated local assessment API",
+        allow_abbrev=False,
+    )
+    api.add_argument("config", type=Path)
+    api.add_argument("--artifacts", type=Path, default=Path(".scopelens/history"))
+    from scopelens.api.cli import local_port
+
+    api.add_argument("--port", type=local_port, default=8000)
+    api.add_argument("--cors-origin", action="append", default=[])
+
     add_commands(commands)
     args = parser.parse_args(argv)
     if args.command == "validate-config":
@@ -229,5 +241,9 @@ def main(argv: list[str] | None = None) -> None:
         run_history(args, parser)
     elif args.command and args.command.startswith("assessment-"):
         run_assessment(args, parser)
+    elif args.command == "api-serve":
+        from scopelens.api.cli import run_api
+
+        run_api(args, parser)
     else:
         parser.print_help()

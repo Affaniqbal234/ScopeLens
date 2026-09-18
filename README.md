@@ -356,6 +356,25 @@ Completed evidence remains available when another stage fails.
 If a worker exits while a stage is running, run `assessment-reconcile`. Stale work
 becomes `interrupted` and is not replayed. Start a new assessment to repeat it.
 
+## Local API
+
+The FastAPI interface binds to `127.0.0.1` and uses the same PostgreSQL history,
+private artifact root, configured scope, and single worker as the CLI. Set a private
+token of at least 32 visible ASCII characters in `SCOPELENS_API_TOKEN`, then run:
+
+```sh
+uv run --locked scopelens api-serve scope.local.toml --cors-origin http://localhost:5173
+```
+
+Send the token in the `Authorization: Bearer` header. Assessment creation records a
+pending M11 manifest; execution is a separate request and never retries terminal
+work. Correlation, assessment, and comparison requests require explicit stored run
+or recheck identifiers. Focused retests can select only a configured origin and
+approved address and run the fixed web-recheck resources. The API does not accept
+scanner flags, template paths, HTTP methods, arbitrary resources, or new scope.
+Interactive OpenAPI documentation is available locally at `/docs`. Raw artifact
+paths and response-body downloads are not exposed.
+
 ## Development
 
 ```sh
@@ -381,7 +400,7 @@ its own credentials and volume. It ignores operator database URLs and verifies
 container ownership before cleanup. Run it on Linux with Docker available:
 
 ```sh
-SCOPELENS_POSTGRES_TEST=1 uv run --locked pytest tests/test_history.py tests/test_correlation_history.py tests/test_orchestration_history.py
+SCOPELENS_POSTGRES_TEST=1 uv run --locked pytest tests/test_history.py tests/test_correlation_history.py tests/test_orchestration_history.py tests/test_api_history.py
 ```
 
 Local HTTP/HTTPS integration tests also verify Host/SNI, redirect containment, and

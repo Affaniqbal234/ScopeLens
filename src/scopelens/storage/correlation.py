@@ -9,7 +9,12 @@ from scopelens.adapters.base import ImportContext
 from scopelens.analysis.correlation import CorrelationError, correlate
 from scopelens.analysis.models import CorrelationResult, RunSource, StoredArtifact
 from scopelens.assessment.capture import assess_correlation
-from scopelens.comparison.compare import ArtifactHealth, compare_assessments
+from scopelens.assessment.models import CaptureAssessmentReport
+from scopelens.comparison.compare import (
+    ArtifactHealth,
+    CaptureHealth,
+    compare_assessments,
+)
 from scopelens.comparison.models import HistoricalComparisonReport
 from scopelens.domain.scope import ScanProfile
 from scopelens.domain.targets import Identifier
@@ -92,24 +97,12 @@ def correlate_history(
     return correlate(project_id, sources)
 
 
-def compare_history(
-    engine: Engine,
-    artifacts: ArtifactStore,
-    project_id: str,
-    baseline_run_ids: Sequence[UUID],
-    current_run_ids: Sequence[UUID],
-) -> HistoricalComparisonReport:
-    if not baseline_run_ids or not current_run_ids:
-        raise CorrelationError("select baseline and current runs explicitly")
-    if len(set(baseline_run_ids)) != len(baseline_run_ids) or len(
-        set(current_run_ids)
-    ) != len(current_run_ids):
-        raise CorrelationError("select each run once per comparison side")
-    selected = tuple(sorted(set(baseline_run_ids) | set(current_run_ids)))
-    combined = correlate_history(engine, project_id, selected)
+def _verify_capture_artifacts(
+    result: CorrelationResult, artifacts: ArtifactStore
+) -> tuple[CorrelationResult, CaptureHealth]:
     verified_sources = []
     verified_health: dict[tuple[UUID, str], ArtifactHealth] = {}
-    for source in combined.sources:
+    for source in result.sources:
         verified_artifacts = []
         for artifact in source.artifacts:
             health: ArtifactHealth = "ready"
@@ -132,7 +125,40 @@ def compare_history(
         verified_sources.append(
             source.model_copy(update={"artifacts": tuple(verified_artifacts)})
         )
-    combined = combined.model_copy(update={"sources": tuple(verified_sources)})
+    verified = result.model_copy(update={"sources": tuple(verified_sources)})
+    return verified, verified_health
+
+
+def load_capture_assessment(
+    engine: Engine,
+    artifacts: ArtifactStore,
+    project_id: str,
+    run_ids: Sequence[UUID],
+) -> tuple[CaptureAssessmentReport, CorrelationResult, CaptureHealth]:
+    """Load one explicit run selection and verify its current artifact health."""
+    verified, health = _verify_capture_artifacts(
+        correlate_history(engine, project_id, run_ids), artifacts
+    )
+    return assess_correlation(verified), verified, health
+
+
+def compare_history(
+    engine: Engine,
+    artifacts: ArtifactStore,
+    project_id: str,
+    baseline_run_ids: Sequence[UUID],
+    current_run_ids: Sequence[UUID],
+) -> HistoricalComparisonReport:
+    if not baseline_run_ids or not current_run_ids:
+        raise CorrelationError("select baseline and current runs explicitly")
+    if len(set(baseline_run_ids)) != len(baseline_run_ids) or len(
+        set(current_run_ids)
+    ) != len(current_run_ids):
+        raise CorrelationError("select each run once per comparison side")
+    selected = tuple(sorted(set(baseline_run_ids) | set(current_run_ids)))
+    combined, verified_health = _verify_capture_artifacts(
+        correlate_history(engine, project_id, selected), artifacts
+    )
     baseline_ids = set(baseline_run_ids)
     current_ids = set(current_run_ids)
     baseline = correlate(

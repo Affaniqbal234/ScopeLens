@@ -48,7 +48,7 @@ jobs:
         if: runner.os == 'Linux'
         env:
           SCOPELENS_POSTGRES_TEST: "1"
-        run: uv run --locked pytest tests/test_history.py tests/test_correlation_history.py tests/test_orchestration_history.py
+        run: uv run --locked pytest tests/test_history.py tests/test_correlation_history.py tests/test_orchestration_history.py tests/test_api_history.py
       - name: Check installed wheel entry points
         run: |
           uv run --isolated --no-project --with ./dist/*.whl scopelens --version

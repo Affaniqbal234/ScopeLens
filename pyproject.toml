@@ -9,9 +9,11 @@ requires-python = ">=3.14,<3.15"
 dependencies = [
     "alembic>=1.18,<2",
     "defusedxml>=0.7.1,<1",
+    "fastapi>=0.116,<1",
     "psycopg[binary]>=3.3,<4",
     "pydantic>=2.13.5,<3",
     "sqlalchemy>=2.0,<2.1",
+    "uvicorn>=0.35,<1",
 ]
 
 [project.scripts]
@@ -39,6 +41,7 @@ files = ["src", "tests"]
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28,<1",
     "mypy>=2.3.1",
     "pytest>=9.1.1",
     "pyyaml>=6.0.3",
