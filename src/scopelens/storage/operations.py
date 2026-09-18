@@ -86,6 +86,7 @@ def scan_history(
     scanner: str = "nmap",
     web_target: WebTarget | None = None,
     binary: str | None = None,
+    orchestration_stage_id: UUID | None = None,
 ) -> ParsedReport:
     binary = binary or (NUCLEI_EXECUTABLE if scanner == "nuclei" else HTTPX_EXECUTABLE)
     capture_time = datetime.now(UTC) if scanner == "nuclei" else None
@@ -118,6 +119,7 @@ def scan_history(
             ),
             template_revision=template_revision() if scanner == "nuclei" else None,
             captured_at=capture_time,
+            orchestration_stage_id=orchestration_stage_id,
         )
         directory = history.artifacts.directory(run_id)
         try:

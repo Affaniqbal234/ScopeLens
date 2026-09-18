@@ -99,7 +99,7 @@ def main(argv: list[str] | None = None) -> None:
                 web.add_argument("--nuclei-binary", default=NUCLEI_EXECUTABLE)
             else:
                 web.add_argument("--httpx-binary", default=HTTPX_EXECUTABLE)
-    from scopelens.storage.cli import add_commands, run_history
+    from scopelens.storage.cli import add_commands, run_assessment, run_history
 
     add_commands(commands)
     args = parser.parse_args(argv)
@@ -227,5 +227,7 @@ def main(argv: list[str] | None = None) -> None:
         print(report.model_dump_json(indent=2))
     elif args.command and args.command.startswith("history-"):
         run_history(args, parser)
+    elif args.command and args.command.startswith("assessment-"):
+        run_assessment(args, parser)
     else:
         parser.print_help()

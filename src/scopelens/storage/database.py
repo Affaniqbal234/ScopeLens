@@ -63,3 +63,19 @@ def locked_run(engine: Engine, run_id: UUID) -> Iterator[Connection]:
                 except BaseException:
                     connection.invalidate()
                     raise
+
+
+@contextmanager
+def single_assessment_worker(engine: Engine) -> Iterator[Connection]:
+    with engine.connect() as connection:
+        acquired = connection.scalar(text("SELECT pg_try_advisory_lock(1935896431)"))
+        connection.commit()
+        if not acquired:
+            raise HistoryError("assessment worker is already running")
+        try:
+            yield connection
+        finally:
+            if not connection.invalidated:
+                connection.rollback()
+                connection.execute(text("SELECT pg_advisory_unlock(1935896431)"))
+                connection.commit()

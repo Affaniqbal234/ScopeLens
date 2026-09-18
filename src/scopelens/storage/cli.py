@@ -4,6 +4,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import cast
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -18,6 +19,9 @@ from scopelens.domain.scope import ScopeViolation, WebTarget
 from scopelens.execution.httpx import HTTPX_EXECUTABLE
 from scopelens.execution.nuclei import NUCLEI_EXECUTABLE
 from scopelens.execution.process import ExecutionError
+from scopelens.orchestration.models import StageKind
+from scopelens.orchestration.store import OrchestrationStore, build_plan
+from scopelens.orchestration.worker import AssessmentWorker
 from scopelens.storage.artifacts import ArtifactError, ArtifactStore
 from scopelens.storage.correlation import compare_history, correlate_history
 from scopelens.storage.database import HistoryError, database, migrate
@@ -131,6 +135,74 @@ def run_history(args: argparse.Namespace, parser: argparse.ArgumentParser) -> No
         engine.dispose()
 
 
+def run_assessment(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    url = os.environ.get("SCOPELENS_DATABASE_URL")
+    if not url:
+        parser.error("set SCOPELENS_DATABASE_URL to your PostgreSQL connection URL")
+    try:
+        engine = database(url)
+    except ValueError, SQLAlchemyError:
+        parser.error("invalid PostgreSQL connection configuration")
+    try:
+        store = OrchestrationStore(engine, ArtifactStore(args.artifacts))
+        if args.command == "assessment-create":
+            config = load_config(args.config)
+            kinds = tuple(cast(StageKind, item) for item in args.stage)
+            result = store.enqueue(
+                args.assessment_id,
+                config,
+                build_plan(config, args.profile, kinds),
+            )
+            print(result.model_dump_json(indent=2))
+        elif args.command == "assessment-list":
+            print(
+                json.dumps(
+                    [
+                        item.model_dump(mode="json")
+                        for item in store.list_manifests(args.project)
+                    ],
+                    indent=2,
+                )
+            )
+        elif args.command == "assessment-show":
+            print(store.get(args.assessment_id).model_dump_json(indent=2))
+        elif args.command == "assessment-work":
+            worker_result = AssessmentWorker(
+                store,
+                httpx_binary=args.httpx_binary,
+                nuclei_binary=args.nuclei_binary,
+            ).run_one(args.assessment_id)
+            if worker_result is None:
+                print("No pending assessment.")
+            else:
+                print(worker_result.model_dump_json(indent=2))
+        elif args.command == "assessment-reconcile":
+            identifiers = AssessmentWorker(store).reconcile()
+            print(json.dumps([str(item) for item in identifiers], indent=2))
+    except (
+        HistoryError,
+        ArtifactError,
+        ConfigurationError,
+        ScopeViolation,
+        ExecutionError,
+    ) as exc:
+        parser.error(str(exc))
+    except ValidationError:
+        parser.error("invalid assessment input or stored domain data")
+    except SQLAlchemyError:
+        parser.error("assessment database operation failed")
+    except OSError:
+        parser.error(
+            "assessment artifact operation failed; retained files may need reconciliation"
+        )
+    except KeyboardInterrupt:
+        parser.exit(
+            130, "assessment interrupted; run assessment-reconcile before new work\n"
+        )
+    finally:
+        engine.dispose()
+
+
 def add_commands(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     for name, help_text in (
         ("history-init", "apply PostgreSQL history migrations"),
@@ -148,7 +220,7 @@ def add_commands(commands: argparse._SubParsersAction[argparse.ArgumentParser]) 
     ):
         command = commands.add_parser(name, help=help_text, allow_abbrev=False)
         if name == "history-compare":
-            command.description = "Compare stored scanner history. Fresh rechecks are not persisted, so this command cannot establish resolved."
+            command.description = "Compare explicitly selected scanner runs. Persisted assessment rechecks use the M10 Python comparison contract."
         if name not in ("history-correlate", "history-assess"):
             command.add_argument(
                 "--artifacts", type=Path, default=Path(".scopelens/history")
@@ -188,3 +260,42 @@ def add_commands(commands: argparse._SubParsersAction[argparse.ArgumentParser]) 
             command.add_argument(
                 "--current-run-id", type=UUID, action="append", required=True
             )
+
+    create = commands.add_parser(
+        "assessment-create",
+        help="persist an explicit assessment plan",
+        allow_abbrev=False,
+    )
+    create.add_argument("config", type=Path)
+    create.add_argument("--assessment-id", type=UUID, required=True)
+    create.add_argument("--profile", required=True)
+    create.add_argument(
+        "--stage",
+        action="append",
+        required=True,
+        choices=("nmap", "httpx", "nuclei", "web_recheck"),
+    )
+    listing = commands.add_parser(
+        "assessment-list", help="list a project's assessment manifests"
+    )
+    listing.add_argument("--project", required=True)
+    showing = commands.add_parser(
+        "assessment-show", help="inspect one assessment and its stage outcomes"
+    )
+    showing.add_argument("assessment_id", type=UUID)
+    working = commands.add_parser(
+        "assessment-work", help="process one pending assessment with the local worker"
+    )
+    working.add_argument("--assessment-id", type=UUID)
+    working.add_argument("--httpx-binary", default=HTTPX_EXECUTABLE)
+    working.add_argument("--nuclei-binary", default=NUCLEI_EXECUTABLE)
+    commands.add_parser(
+        "assessment-reconcile", help="mark abandoned assessment work interrupted"
+    )
+    for command in (create, listing, showing, working):
+        command.add_argument(
+            "--artifacts", type=Path, default=Path(".scopelens/history")
+        )
+    commands.choices["assessment-reconcile"].add_argument(
+        "--artifacts", type=Path, default=Path(".scopelens/history")
+    )

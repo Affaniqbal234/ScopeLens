@@ -1,4 +1,3 @@
-import json
 from datetime import datetime
 from hashlib import sha256
 from uuid import UUID, uuid4
@@ -18,12 +17,7 @@ from scopelens.storage import schema as s
 from scopelens.storage.artifacts import ArtifactError, ArtifactStore
 from scopelens.storage.database import HistoryError, locked_run
 from scopelens.storage.reports import read_report
-
-
-def _digest(value: object) -> str:
-    return sha256(
-        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+from scopelens.storage.snapshots import scope_snapshot
 
 
 class History:
@@ -44,6 +38,7 @@ class History:
         scanner_version: str | None = None,
         template_revision: str | None = None,
         captured_at: datetime | None = None,
+        orchestration_stage_id: UUID | None = None,
     ) -> None:
         config = ProjectConfig.model_validate(config.model_dump())
         profile = next((p for p in config.profiles if p.id == profile_id), None)
@@ -97,9 +92,29 @@ class History:
             raise HistoryError(
                 "template revision and capture time are only valid for Nuclei"
             )
-        scope = config.project.scope.model_dump(mode="json")
-        snapshot_id = _digest([config.project.id, scope])
+        snapshot_id, scope = scope_snapshot(config)
         with connection.begin():
+            reservation = (
+                connection.execute(
+                    select(
+                        s.assessment_stages.c.id,
+                        s.assessment_stages.c.project_id,
+                        s.assessment_stages.c.status,
+                    ).where(s.assessment_stages.c.planned_run_id == run_id)
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if reservation is not None and (
+                orchestration_stage_id != reservation["id"]
+                or reservation["project_id"] != config.project.id
+                or reservation["status"] != "running"
+            ):
+                raise HistoryError(
+                    "run identifier is reserved for another assessment stage"
+                )
+            if orchestration_stage_id is not None and reservation is None:
+                raise HistoryError("assessment stage does not own the planned run")
             existing = (
                 connection.execute(select(s.runs).where(s.runs.c.id == run_id))
                 .mappings()
@@ -126,6 +141,10 @@ class History:
                 ) != (config.project.id, snapshot_id, revision, kind):
                     raise HistoryError(
                         "run identifier already belongs to different input"
+                    )
+                if orchestration_stage_id is not None:
+                    raise HistoryError(
+                        "planned assessment run already exists and cannot be replayed"
                     )
                 return
             connection.execute(
@@ -472,8 +491,50 @@ class History:
             except HistoryError:
                 issues.append({"run_id": str(run_id), "issue": "busy"})
         known_runs = {str(run_id) for run_id in run_ids}
+        with self.engine.begin() as connection:
+            recheck_roots = set()
+            recheck_paths = set()
+            for artifact in connection.execute(select(s.recheck_artifacts)).mappings():
+                relative = artifact["relative_path"]
+                recheck_roots.add(relative.split("/", 1)[0])
+                recheck_paths.add(relative)
+                health = "ready"
+                try:
+                    raw = self.artifacts.read(relative)
+                    if (
+                        len(raw) != artifact["size_bytes"]
+                        or sha256(raw).hexdigest() != artifact["sha256"]
+                    ):
+                        health = "corrupt"
+                except FileNotFoundError:
+                    health = "missing"
+                except OSError, ArtifactError:
+                    health = "corrupt"
+                connection.execute(
+                    update(s.recheck_artifacts)
+                    .where(
+                        s.recheck_artifacts.c.acquisition_id
+                        == artifact["acquisition_id"]
+                    )
+                    .values(health=health)
+                )
+                if health != "ready":
+                    issues.append(
+                        {
+                            "stage_id": str(artifact["stage_id"]),
+                            "issue": health,
+                            "path": relative,
+                        }
+                    )
+        for root in recheck_roots:
+            directory = self.artifacts.root / root
+            if directory.is_dir() and not directory.is_symlink():
+                for path in directory.iterdir():
+                    relative = f"{root}/{path.name}"
+                    if relative not in recheck_paths:
+                        issues.append({"issue": "unreferenced", "path": relative})
         for path in self.artifacts.root.iterdir():
-            if path.name not in known_runs:
+            if path.name not in known_runs and path.name not in recheck_roots:
                 try:
                     candidate = UUID(path.name)
                 except ValueError:

@@ -329,12 +329,32 @@ The command reads the selected history without modifying it or choosing runs by 
 For HSTS, missing-to-present can resolve the missing-header condition;
 present-to-missing cannot. Header-value differences remain evidence and do not
 change lifecycle state when both responses contain the header.
-This command cannot currently report `resolved`: stored exposure reports lack
-supported negatives, and stored httpx reports cannot establish missing HSTS.
-The Python comparison interface also accepts fresh
-recheck reports, which are not yet persisted. Resolution requires verified artifacts
-and non-overlapping acquisition times; import dates and scanner timestamps do not
-establish that ordering.
+`history-compare` accepts scanner run IDs only. Stored exposure reports lack
+supported negatives, and stored httpx reports cannot establish missing HSTS, so
+that command cannot currently report `resolved`. Assessment rechecks are
+persisted separately and can be supplied to the Python comparison interface with
+their verified artifact health. Resolution also requires non-overlapping acquisition
+times; import dates and scanner timestamps do not establish that ordering.
+
+## Durable assessments
+
+Create an assessment from an explicit stage list, then run one pending manifest:
+
+```sh
+uv run --locked scopelens assessment-create scope.local.toml --assessment-id 00000000-0000-4000-8000-000000000010 --profile conservative --stage nmap --stage httpx --stage nuclei --stage web_recheck
+uv run --locked scopelens assessment-work --assessment-id 00000000-0000-4000-8000-000000000010
+uv run --locked scopelens assessment-show 00000000-0000-4000-8000-000000000010
+uv run --locked scopelens assessment-list --project local-lab
+```
+
+The manifest stores the authorized scope, profile, exact targets, fixed resources,
+and stage order before work begins. One local worker processes it without automatic
+retries. Scanner runs remain in normal history; fresh recheck reports and their raw
+response artifacts are stored with acquisition timing and address provenance.
+Completed evidence remains available when another stage fails.
+
+If a worker exits while a stage is running, run `assessment-reconcile`. Stale work
+becomes `interrupted` and is not replayed. Start a new assessment to repeat it.
 
 ## Development
 
@@ -361,7 +381,7 @@ its own credentials and volume. It ignores operator database URLs and verifies
 container ownership before cleanup. Run it on Linux with Docker available:
 
 ```sh
-SCOPELENS_POSTGRES_TEST=1 uv run --locked pytest tests/test_history.py tests/test_correlation_history.py
+SCOPELENS_POSTGRES_TEST=1 uv run --locked pytest tests/test_history.py tests/test_correlation_history.py tests/test_orchestration_history.py
 ```
 
 Local HTTP/HTTPS integration tests also verify Host/SNI, redirect containment, and

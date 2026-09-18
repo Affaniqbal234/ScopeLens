@@ -64,7 +64,8 @@ class ArtifactStore:
             valid = (
                 len(parts) == 2
                 and str(UUID(parts[0])) == parts[0]
-                and parts[1] in ("stdout.xml", "stdout.jsonl", "stderr.txt")
+                and parts[1]
+                in ("stdout.xml", "stdout.jsonl", "stderr.txt", "response.http")
             )
         except ValueError:
             valid = False

@@ -80,7 +80,7 @@ def test_fresh_migration_and_repeat(engine: Engine) -> None:
     with engine.connect() as connection:
         assert (
             connection.scalar(text("SELECT version_num FROM alembic_version"))
-            == "0003_nuclei"
+            == "0004_orchestration"
         )
         assert (
             compare_metadata(MigrationContext.configure(connection), s.metadata) == []
@@ -527,7 +527,7 @@ def test_migration_downgrade_in_disposable_schema(engine: Engine) -> None:
             command.downgrade(config, "0001_scan_history")
         assert (
             connection.scalar(text("SELECT version_num FROM alembic_version"))
-            == "0003_nuclei"
+            == "0004_orchestration"
         )
         connection.execute(
             update(s.stages).where(s.stages.c.id == run_id).values(scanner="nmap")
@@ -540,7 +540,7 @@ def test_migration_downgrade_in_disposable_schema(engine: Engine) -> None:
         command.upgrade(config, "head")
         assert (
             connection.scalar(text("SELECT version_num FROM alembic_version"))
-            == "0003_nuclei"
+            == "0004_orchestration"
         )
         # This generated schema exists only in this test-owned database.
         connection.execute(text(f'DROP SCHEMA "{name}" CASCADE'))
