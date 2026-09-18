@@ -375,6 +375,22 @@ scanner flags, template paths, HTTP methods, arbitrary resources, or new scope.
 Interactive OpenAPI documentation is available locally at `/docs`. Raw artifact
 paths and response-body downloads are not exposed.
 
+### Local dashboard
+
+Start the API with the dashboard's exact development origin, then run Vite in a
+second terminal:
+
+```sh
+uv run --locked scopelens api-serve scope.local.toml --cors-origin http://127.0.0.1:5173
+cd frontend
+npm ci
+npm run dev
+```
+
+Open `http://127.0.0.1:5173` and enter the local API token. The dashboard keeps
+the token in memory for the current tab. Use `npm test`, `npm run typecheck`, and
+`npm run build` for frontend verification.
+
 ## Development
 
 ```sh
