@@ -306,9 +306,9 @@ resource. Exposure checks treat timeouts, transport failures, malformed or trunc
 responses, recognized authentication or blocking responses, skipped checks, and
 empty Nuclei output as inconclusive. Rechecks require explicit HTTP body framing;
 close-delimited bodies, chunk extensions, and trailers are unsupported.
-The HSTS claim is header presence:
-positive means present, negative means absent from fully parsed headers of a usable
-HTTPS hostname response. Body truncation alone does not invalidate captured headers;
+The HSTS claim is a missing header: positive means absent from fully parsed headers
+of a usable HTTPS hostname response; negative means the header was observed.
+Body truncation alone does not invalidate captured headers;
 malformed framing or an ambiguous response still prevents an HSTS conclusion.
 Stored httpx metadata can support presence, but cannot establish absence.
 The rule does not validate policy, TLS certificates, or browser behavior.
@@ -320,14 +320,18 @@ Compare explicit baseline and current run selections:
 uv run --locked scopelens history-compare --project local-lab --baseline-run-id 00000000-0000-4000-8000-000000000001 --current-run-id 00000000-0000-4000-8000-000000000002
 ```
 
-Historical comparison reports `new`, `changed`, `unchanged`, `resolved`,
+Historical comparison reports `new`, `unchanged`, `resolved`,
 `not_observed`, or `unknown` for each exact rule, origin, resource, and address.
 `resolved` requires a later supported negative from the same rule version and
 backend context. Missing findings, omitted checks, failed checks, scope changes,
 unhealthy evidence, and responses from another address cannot establish resolution.
 The command reads the selected history without modifying it or choosing runs by date.
-Stored scanner reports cannot establish supported negatives, so this command cannot
-currently report `resolved`. The Python comparison interface also accepts fresh
+For HSTS, missing-to-present can resolve the missing-header condition;
+present-to-missing cannot. Header-value differences remain evidence and do not
+change lifecycle state when both responses contain the header.
+This command cannot currently report `resolved`: stored exposure reports lack
+supported negatives, and stored httpx reports cannot establish missing HSTS.
+The Python comparison interface also accepts fresh
 recheck reports, which are not yet persisted. Resolution requires verified artifacts
 and non-overlapping acquisition times; import dates and scanner timestamps do not
 establish that ordering.

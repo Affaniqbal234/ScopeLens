@@ -37,7 +37,6 @@ type ArtifactHealth = Literal["ready", "missing", "corrupt"]
 type CaptureHealth = Mapping[tuple[UUID, str], ArtifactHealth]
 
 _NOT_OBSERVED_REASONS = {"check_not_run", "no_supported_negative_evidence"}
-_MATERIAL_FACTS = {"http.header.strict_transport_security"}
 _TEMPLATE_IDS = {
     DIRECTORY_RULE: "scopelens-directory-listing",
     GIT_CONFIG_RULE: "scopelens-exposed-git-config",
@@ -228,12 +227,13 @@ def _fresh_context_valid(
         return False
     positive = assessment.outcome == "supported_positive"
     if claim.rule_id == HSTS_RULE:
+        present = not positive
         return (
             acquisition.status in ("complete", "truncated")
             and response.status_code == 200
             and facts.get("http.headers_complete") is True
-            and response.strict_transport_security_present == positive
-            and facts.get("http.header.strict_transport_security_present") is positive
+            and response.strict_transport_security_present == present
+            and facts.get("http.header.strict_transport_security_present") is present
         )
     return (
         acquisition.status == "complete"
@@ -438,26 +438,6 @@ def _coverage(
     return CoverageDecision(status=status, reason=reason, explanation=explanation)
 
 
-def _facts(entry: _Entry) -> dict[str, frozenset[str]]:
-    values: dict[str, set[str]] = {}
-    for use in entry.evidence:
-        for fact in use.facts:
-            if fact.key in _MATERIAL_FACTS:
-                values.setdefault(fact.key, set()).add(str(fact.value).strip(" \t"))
-    return {key: frozenset(items) for key, items in values.items()}
-
-
-def _material_facts_changed(baseline: _Entry, current: _Entry) -> bool:
-    before = _facts(baseline)
-    after = _facts(current)
-    return (
-        baseline.assessment.claim.rule_id == HSTS_RULE
-        and bool(before)
-        and before.keys() == after.keys()
-        and before != after
-    )
-
-
 def _template_revisions(entry: _Entry) -> set[str]:
     return {
         str(fact.value)
@@ -644,11 +624,7 @@ def _result(
             bool(baseline.artifact_digests)
             and baseline.artifact_digests == current.artifact_digests
         )
-        if (
-            same_capture
-            and before == after
-            and not _material_facts_changed(baseline, current)
-        ):
+        if same_capture and before == after:
             state, reason = "unchanged", "same_capture_no_new_acquisition"
             explanation = "The selected evidence supports the same conclusion; duplicate bytes establish no new acquisition."
         elif not _is_later(baseline, current):
@@ -667,11 +643,6 @@ def _result(
             explanation = (
                 "The condition is supported now after a comparable baseline negative."
             )
-        elif before == after == "supported_positive" and _material_facts_changed(
-            baseline, current
-        ):
-            state, reason = "changed", "material_evidence_changed"
-            explanation = "Both responses contained HSTS; the set of captured header values differed. This does not evaluate policy strength."
         else:
             state, reason = "unchanged", "supported_conclusion_unchanged"
             explanation = "The comparable supported conclusion did not change."

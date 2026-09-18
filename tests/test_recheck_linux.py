@@ -136,7 +136,7 @@ def test_redirect_is_not_followed(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     ("hsts", "outcome"),
-    [(False, "supported_negative"), (True, "supported_positive")],
+    [(False, "supported_positive"), (True, "supported_negative")],
 )
 @pytest.mark.parametrize("truncated", [False, True])
 def test_https_hsts_header_presence_and_absence(

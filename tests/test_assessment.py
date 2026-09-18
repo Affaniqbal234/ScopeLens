@@ -216,12 +216,13 @@ def test_response_body_must_match_its_evidence_digest() -> None:
 @pytest.mark.parametrize(
     ("origin", "hsts", "headers_complete", "status_code", "outcome"),
     [
-        ("https://site.invalid", False, True, 200, "supported_negative"),
-        ("https://site.invalid", True, True, 200, "supported_positive"),
+        ("https://site.invalid", False, True, 200, "supported_positive"),
+        ("https://site.invalid", True, True, 200, "supported_negative"),
         ("https://127.0.0.1", False, True, 200, "inconclusive"),
         ("http://site.invalid", False, True, 200, "inconclusive"),
         ("https://site.invalid", False, False, 200, "inconclusive"),
         ("https://site.invalid", False, True, 302, "inconclusive"),
+        ("https://site.invalid", False, True, 401, "inconclusive"),
         ("https://site.invalid", False, True, 403, "inconclusive"),
         ("https://site.invalid", False, True, 500, "inconclusive"),
     ],
@@ -246,6 +247,8 @@ def test_hsts_prerequisites_and_outcomes(
         ),
     )
     assert result.outcome == outcome
+    assert result.claim.rule_id == "scopelens.hsts-header-missing"
+    assert result.claim.rule_version == "1"
 
 
 def _evidence(scanner: str, digest: str = "a" * 64) -> EvidenceReference:
@@ -363,7 +366,7 @@ def test_existing_httpx_can_support_header_presence_but_not_absence() -> None:
         )
     )
     hsts = next(item for item in report.assessments if item.claim.rule_id == HSTS_RULE)
-    assert hsts.outcome == "supported_positive"
+    assert hsts.outcome == "supported_negative"
     without_header = assess_correlation(
         correlate(
             "lab",
@@ -447,7 +450,7 @@ def test_hsts_complete_headers_can_be_assessed_despite_body_truncation(
             hsts=hsts,
         ),
     )
-    assert result.outcome == ("supported_positive" if hsts else "supported_negative")
+    assert result.outcome == ("supported_negative" if hsts else "supported_positive")
 
 
 @pytest.mark.parametrize("status_code", [200, 404, 410])
@@ -749,7 +752,7 @@ def test_origin_without_qualifying_response_cannot_inherit_hsts_presence(
         )
     )
     assert any(
-        item.claim.origin == first and item.outcome == "supported_positive"
+        item.claim.origin == first and item.outcome == "supported_negative"
         for item in report.assessments
     )
     assert all(

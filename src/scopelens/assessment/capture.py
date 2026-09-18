@@ -291,7 +291,7 @@ def _hsts_assessments(result: CorrelationResult) -> list[AssessmentResult]:
             reason = "hsts_not_applicable"
             explanation = "The origin is outside this hostname-based HTTPS rule."
         elif qualifying_records and all(qualifying_records):
-            outcome = "supported_positive"
+            outcome = "supported_negative"
             reason = "hsts_header_observed"
             explanation = "Each evaluated stored response explicitly captured Strict-Transport-Security in a usable context."
         else:

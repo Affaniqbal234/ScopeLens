@@ -523,6 +523,56 @@ def test_project_mixing_and_missing_capture_context_are_rejected() -> None:
         compare_assessments(stored, fresh_report(number=4, status_code=404))
 
 
+def fresh_hsts_report(
+    *,
+    number: int,
+    present: bool,
+    address: str = "127.0.0.1",
+    status: AcquisitionStatus = "complete",
+    headers_complete: bool = True,
+) -> RecheckReport:
+    capture = exchange(number=number, address=address, status=status)
+    if capture.acquisition.response is not None:
+        response = capture.acquisition.response.model_copy(
+            update={
+                "strict_transport_security_present": present,
+                "headers_complete": headers_complete,
+            }
+        )
+        capture = CapturedExchange(
+            capture.acquisition.model_copy(update={"response": response}), capture.body
+        )
+    return RecheckReport(
+        project_id="lab",
+        acquisitions=(capture.acquisition,),
+        assessments=(assess_hsts_recheck("lab", capture),),
+    )
+
+
+@pytest.mark.parametrize(
+    ("baseline_present", "current_present", "expected"),
+    [
+        (False, True, "resolved"),
+        (True, False, "new"),
+        (False, False, "unchanged"),
+        (True, True, "unchanged"),
+    ],
+)
+@pytest.mark.parametrize("status", ["complete", "truncated"])
+def test_missing_hsts_lifecycle(
+    baseline_present: bool,
+    current_present: bool,
+    expected: str,
+    status: AcquisitionStatus,
+) -> None:
+    result = compare_assessments(
+        fresh_hsts_report(number=1, present=baseline_present),
+        fresh_hsts_report(number=2, present=current_present, status=status),
+    )
+    assert state(result, HSTS_RULE) == expected
+    assert result.results[0].claim.rule_id == "scopelens.hsts-header-missing"
+
+
 def stored_hsts(
     *, run_number: int, value: str
 ) -> tuple[CorrelationResult, CaptureAssessmentReport]:
@@ -595,7 +645,7 @@ def stored_hsts(
     return projection, assess_correlation(projection)
 
 
-def test_material_hsts_header_change_is_changed_without_policy_claim() -> None:
+def test_header_value_change_preserves_negative_condition_and_evidence() -> None:
     baseline_projection, baseline = stored_hsts(run_number=1, value="max-age=60")
     current_projection, current = stored_hsts(run_number=2, value="max-age=31536000")
     result = compare_assessments(
@@ -605,8 +655,21 @@ def test_material_hsts_header_change_is_changed_without_policy_claim() -> None:
         current_correlation=current_projection,
     )
     item = next(item for item in result.results if item.claim.rule_id == HSTS_RULE)
-    assert item.state == "changed"
-    assert "does not evaluate policy strength" in item.explanation
+    assert item.state == "unchanged"
+    assert item.baseline is not None and item.current is not None
+    assert item.baseline.outcome == item.current.outcome == "supported_negative"
+    assert {
+        fact.value
+        for use in item.baseline.evidence_used
+        for fact in use.facts
+        if fact.key == "http.header.strict_transport_security"
+    } == {"max-age=60"}
+    assert {
+        fact.value
+        for use in item.current.evidence_used
+        for fact in use.facts
+        if fact.key == "http.header.strict_transport_security"
+    } == {"max-age=31536000"}
 
 
 def test_different_evidence_representation_alone_is_not_changed() -> None:
@@ -936,7 +999,7 @@ def test_httpx_backend_is_taken_from_its_response_record() -> None:
     )
     assert {item.claim.address for item in result.results} == {"127.0.0.1", "127.0.0.2"}
     assert state(result, HSTS_RULE, "127.0.0.1") == "not_observed"
-    assert state(result, HSTS_RULE, "127.0.0.2") == "new"
+    assert state(result, HSTS_RULE, "127.0.0.2") == "unknown"
 
 
 def test_import_dates_and_duplicate_copies_do_not_manufacture_progression() -> None:
@@ -1168,40 +1231,97 @@ def test_failed_httpx_attempt_keeps_target_context_without_claiming_a_peer() -> 
 def test_hsts_resolution_requires_headers_but_not_an_entire_body(
     complete_headers: bool,
 ) -> None:
-    first = exchange(number=1)
-    assert first.acquisition.response is not None
-    acquisition = first.acquisition.model_copy(
-        update={
-            "response": first.acquisition.response.model_copy(
-                update={"strict_transport_security_present": True}
-            )
-        }
-    )
-    first = CapturedExchange(acquisition, first.body)
-    second = exchange(number=2, status="truncated")
-    assert second.acquisition.response is not None
-    second = CapturedExchange(
-        second.acquisition.model_copy(
-            update={
-                "response": second.acquisition.response.model_copy(
-                    update={"headers_complete": complete_headers}
-                )
-            }
-        ),
-        second.body,
-    )
-    baseline = RecheckReport(
-        project_id="lab",
-        acquisitions=(first.acquisition,),
-        assessments=(assess_hsts_recheck("lab", first),),
-    )
-    current = RecheckReport(
-        project_id="lab",
-        acquisitions=(second.acquisition,),
-        assessments=(assess_hsts_recheck("lab", second),),
+    baseline = fresh_hsts_report(number=1, present=False)
+    current = fresh_hsts_report(
+        number=2,
+        present=True,
+        status="truncated",
+        headers_complete=complete_headers,
     )
     result = compare_assessments(baseline, current)
     assert state(result, HSTS_RULE) == ("resolved" if complete_headers else "unknown")
+
+
+def test_hsts_presence_on_another_backend_cannot_resolve_missing_header() -> None:
+    result = compare_assessments(
+        fresh_hsts_report(number=1, present=False),
+        fresh_hsts_report(number=2, present=True, address="127.0.0.2"),
+    )
+    assert state(result, HSTS_RULE, "127.0.0.1") == "not_observed"
+    assert state(result, HSTS_RULE, "127.0.0.2") == "unknown"
+    assert all(item.state != "resolved" for item in result.results)
+
+
+def test_stored_hsts_presence_can_disprove_a_previously_missing_header() -> None:
+    projection, stored = stored_hsts(run_number=2, value="max-age=60")
+    result = compare_assessments(
+        fresh_hsts_report(number=1, present=False),
+        stored,
+        current_correlation=projection,
+    )
+    assert state(result, HSTS_RULE) == "resolved"
+    baseline_projection, baseline = stored_hsts(run_number=1, value="max-age=60")
+    result = compare_assessments(
+        baseline,
+        fresh_hsts_report(number=2, present=False),
+        baseline_correlation=baseline_projection,
+    )
+    assert state(result, HSTS_RULE) == "new"
+
+
+def test_legacy_hsts_presence_claim_does_not_alias_missing_header() -> None:
+    baseline = fresh_hsts_report(number=1, present=True)
+    assessment = baseline.assessments[0]
+    legacy_claim = assessment.claim.model_copy(
+        update={"rule_id": "scopelens.hsts-header-present"}
+    )
+    legacy = assessment.model_copy(
+        update={
+            "claim": legacy_claim,
+            "id": assessment_id("lab", legacy_claim),
+            "outcome": "supported_positive",
+        }
+    )
+    baseline = baseline.model_copy(update={"assessments": (legacy,)})
+    current = fresh_hsts_report(number=2, present=True)
+    assert legacy.id != current.assessments[0].id
+    result = compare_assessments(baseline, current)
+    assert len({item.claim.rule_id for item in result.results}) == 2
+    assert all(item.state != "resolved" for item in result.results)
+
+
+def test_hsts_identity_ignores_acquisition_and_presentation_changes() -> None:
+    baseline = fresh_hsts_report(number=1, present=False)
+    current = fresh_hsts_report(number=2, present=True)
+    assert baseline.assessments[0].id == current.assessments[0].id
+    first = compare_assessments(baseline, current)
+    assessment = current.assessments[0]
+    current = current.model_copy(
+        update={
+            "assessments": (
+                assessment.model_copy(
+                    update={
+                        "claim": assessment.claim.model_copy(
+                            update={"statement": "Different wording."}
+                        ),
+                        "explanation": "Different explanation.",
+                    }
+                ),
+            )
+        }
+    )
+    second = compare_assessments(baseline, current)
+    third = compare_assessments(
+        fresh_hsts_report(number=10, present=False),
+        fresh_hsts_report(number=11, present=True),
+    )
+    assert first.results[0].id == second.results[0].id == third.results[0].id
+    assert (
+        state(first, HSTS_RULE)
+        == state(second, HSTS_RULE)
+        == state(third, HSTS_RULE)
+        == "resolved"
+    )
 
 
 @pytest.mark.parametrize(

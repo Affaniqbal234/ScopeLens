@@ -18,7 +18,7 @@ from scopelens.assessment.models import (
 
 DIRECTORY_RULE = "scopelens.directory-listing"
 GIT_CONFIG_RULE = "scopelens.git-config-exposure"
-HSTS_RULE = "scopelens.hsts-header-present"
+HSTS_RULE = "scopelens.hsts-header-missing"
 RULE_VERSION = "1"
 
 _ACCESS_PAGE = re.compile(
@@ -92,7 +92,7 @@ def hsts_claim(origin: str) -> Claim:
         origin=origin,
         resource="/",
         statement=(
-            "The checked HTTPS hostname response contained a "
+            "The checked HTTPS hostname response lacked a "
             "Strict-Transport-Security header."
         ),
     )
@@ -427,7 +427,7 @@ def assess_hsts_recheck(
         id=assessment_id(project_id, claim),
         claim=claim,
         prerequisites=prerequisites,
-        outcome="supported_negative" if missing else "supported_positive",
+        outcome="supported_positive" if missing else "supported_negative",
         reason="hsts_header_absent" if missing else "hsts_header_present",
         explanation=(
             "The complete captured header block did not contain Strict-Transport-Security."
