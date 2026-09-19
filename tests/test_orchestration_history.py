@@ -27,6 +27,7 @@ from scopelens.config import ProjectConfig
 from scopelens.execution.process import ExecutionError
 from scopelens.orchestration.store import OrchestrationStore, build_plan
 from scopelens.orchestration.worker import AssessmentWorker
+from scopelens.reporting.service import load_assessment_report
 from scopelens.storage import schema as s
 from scopelens.storage.artifacts import ArtifactStore
 from scopelens.storage.database import (
@@ -349,6 +350,15 @@ def test_worker_preserves_completed_recheck_when_later_stage_fails(
     loaded, health = store.load_recheck(result.stages[0].id)
     assert loaded.assessments[0].outcome == "supported_negative"
     assert set(health.values()) == {"ready"}
+    exported = load_assessment_report(store, assessment_id)
+    assert exported.assessment_id == assessment_id
+    assert exported.project.id == project.project.id
+    assert exported.profile.id == "safe"
+    assert exported.stages[0].status == "completed"
+    display_outcomes = {item.display_outcome for item in exported.claims}
+    assert "condition_not_supported_by_this_evidence" in display_outcomes
+    assert "condition_supported" not in display_outcomes
+    assert {item.health for item in exported.evidence_health} == {"ready"}
     assert calls == 1
     assert AssessmentWorker(store).run_one(assessment_id) is None
     assert calls == 1
@@ -422,6 +432,8 @@ def test_persisted_recheck_round_trip_and_m10_resolution(
     assert first_artifact is not None
     store.artifacts.path(first_artifact.artifact_path).unlink()
     _, unhealthy = store.load_recheck(stage.id)
+    unhealthy_export = load_assessment_report(store, assessment_id)
+    assert "missing" in {item.health for item in unhealthy_export.evidence_health}
     comparison = compare_assessments(
         baseline,
         loaded,

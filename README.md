@@ -391,6 +391,33 @@ Open `http://127.0.0.1:5173` and enter the local API token. The dashboard keeps
 the token in memory for the current tab. Use `npm test`, `npm run typecheck`, and
 `npm run build` for frontend verification.
 
+## Reports and public snapshots
+
+Export one explicit durable assessment as structured JSON or printable standalone
+HTML. Export refuses to overwrite an existing file.
+
+```sh
+uv run --locked scopelens assessment-report 00000000-0000-4000-8000-000000000010 --format json --output assessment.json
+uv run --locked scopelens assessment-report 00000000-0000-4000-8000-000000000010 --format html --output assessment.html
+```
+
+Historical reports require an explicit baseline and current selection. Each side
+may use stored run IDs or one persisted recheck written as
+`ASSESSMENT_UUID:STAGE_UUID`.
+
+```sh
+uv run --locked scopelens comparison-report --project local-lab --baseline-recheck 00000000-0000-4000-8000-000000000010:00000000-0000-4000-8000-000000000011 --current-recheck 00000000-0000-4000-8000-000000000020:00000000-0000-4000-8000-000000000021 --format html --output comparison.html
+```
+
+In reports, `resolved` means that a later comparable recheck did not support the
+previous condition within the same assessed route, backend context, and evidence
+limits. It does not prove an underlying code fix or safety outside that context.
+
+Use `--format public-snapshot` to write `public-snapshot-v1` JSON from recorded
+data. The snapshot uses an explicit field allowlist, replaces origins and addresses
+with example values, and omits raw bodies, artifact paths, source explanations, and
+local credentials. Snapshot generation does not contact targets or run scanners.
+
 ## Development
 
 ```sh

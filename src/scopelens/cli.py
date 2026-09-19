@@ -99,6 +99,7 @@ def main(argv: list[str] | None = None) -> None:
                 web.add_argument("--nuclei-binary", default=NUCLEI_EXECUTABLE)
             else:
                 web.add_argument("--httpx-binary", default=HTTPX_EXECUTABLE)
+    from scopelens.reporting.cli import add_report_commands
     from scopelens.storage.cli import add_commands, run_assessment, run_history
 
     api = commands.add_parser(
@@ -114,6 +115,7 @@ def main(argv: list[str] | None = None) -> None:
     api.add_argument("--cors-origin", action="append", default=[])
 
     add_commands(commands)
+    add_report_commands(commands)
     args = parser.parse_args(argv)
     if args.command == "validate-config":
         try:
@@ -240,7 +242,16 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command and args.command.startswith("history-"):
         run_history(args, parser)
     elif args.command and args.command.startswith("assessment-"):
-        run_assessment(args, parser)
+        if args.command == "assessment-report":
+            from scopelens.reporting.cli import run_report
+
+            run_report(args, parser)
+        else:
+            run_assessment(args, parser)
+    elif args.command == "comparison-report":
+        from scopelens.reporting.cli import run_report
+
+        run_report(args, parser)
     elif args.command == "api-serve":
         from scopelens.api.cli import run_api
 
