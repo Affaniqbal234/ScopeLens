@@ -17,6 +17,28 @@ uv run --locked scopelens --version
 The package also supports `uv run --locked python -m scopelens --help`.
 Offline validation and report parsing work without Docker or scanner binaries.
 
+### Local application with Docker
+
+The supported container path uses Docker Desktop with WSL2 or Docker Engine with
+Compose. It starts PostgreSQL, the authenticated API, the dashboard, and the
+isolated controlled lab. Host ports bind to `127.0.0.1`.
+
+```powershell
+Copy-Item .env.example .env
+# Set SCOPELENS_POSTGRES_PASSWORD and a 32-character or longer SCOPELENS_API_TOKEN.
+docker compose config --quiet
+docker compose build
+docker compose up -d --wait
+```
+
+Open `http://127.0.0.1:8080` and enter the API token from `.env`. The bundled
+scope authorizes only the controlled Docker lab. Assessment creation and worker
+execution remain separate actions. Restarting the stack applies pending database
+migrations but does not run or retry assessments.
+
+See [local operations and recovery](docs/operations.md) for the controlled
+vulnerable/fixed workflow and paired database/artifact backups.
+
 ## Scope configuration
 
 Save this example as `scope.local.toml`. Files ending in `.local.toml` are ignored
@@ -417,6 +439,19 @@ Use `--format public-snapshot` to write `public-snapshot-v1` JSON from recorded
 data. The snapshot uses an explicit field allowlist, replaces origins and addresses
 with example values, and omits raw bodies, artifact paths, source explanations, and
 local credentials. Snapshot generation does not contact targets or run scanners.
+
+The static public demo consumes a bundled `public-snapshot-v1` fixture and has no
+API client, worker action, token, database, evidence volume, or scanner binary.
+
+```sh
+cd frontend
+npm ci
+npm run build:demo
+npm run verify:demo
+```
+
+The static files are written to `frontend/dist-demo/`. For a loopback-only local
+preview, run `docker compose -f deploy/compose.demo.yaml up -d --build --wait`.
 
 ## Development
 

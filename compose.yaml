@@ -1,0 +1,120 @@
+name: scopelens
+
+services:
+  postgres:
+    image: postgres:18-bookworm
+    environment:
+      POSTGRES_DB: scopelens
+      POSTGRES_USER: scopelens
+      POSTGRES_PASSWORD: ${SCOPELENS_POSTGRES_PASSWORD:?set SCOPELENS_POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    networks: [data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U scopelens -d scopelens"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    security_opt: [no-new-privileges:true]
+    logging: &bounded-logs
+      driver: local
+      options: {max-size: 5m, max-file: "2", compress: "false"}
+
+  lab-target:
+    build:
+      context: .
+      dockerfile: lab/Dockerfile
+      target: target
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 32
+    mem_limit: 64m
+    cpus: 0.5
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    networks:
+      assessment:
+        ipv4_address: 172.31.255.2
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=2).close()"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    logging: *bounded-logs
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      SCOPELENS_DATABASE_URL: postgresql+psycopg://scopelens:${SCOPELENS_POSTGRES_PASSWORD:?set SCOPELENS_POSTGRES_PASSWORD in .env}@postgres:5432/scopelens
+      SCOPELENS_API_TOKEN: ${SCOPELENS_API_TOKEN:?set SCOPELENS_API_TOKEN in .env}
+      SCOPELENS_CORS_ORIGIN: ${SCOPELENS_CORS_ORIGIN:-http://127.0.0.1:8080}
+    volumes:
+      - artifacts:/var/lib/scopelens
+      - ${SCOPELENS_CONFIG_PATH:-./deploy/scope.lab.toml}:/etc/scopelens/scope.toml:ro
+    ports:
+      - 127.0.0.1:${SCOPELENS_API_PORT:-8000}:8000
+    networks: [data, assessment]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      lab-target:
+        condition: service_healthy
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 768m
+    cpus: 2
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).close()"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+    logging: *bounded-logs
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      target: dashboard
+      args:
+        VITE_SCOPELENS_API_URL: ${SCOPELENS_API_URL:-http://127.0.0.1:8000}
+    ports:
+      - 127.0.0.1:${SCOPELENS_DASHBOARD_PORT:-8080}:8080
+    networks: [ui]
+    depends_on:
+      api:
+        condition: service_healthy
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 32
+    mem_limit: 128m
+    cpus: 0.5
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/', timeout=2).close()"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    logging: *bounded-logs
+
+networks:
+  data:
+    internal: true
+  assessment:
+    ipam:
+      config:
+        - subnet: 172.31.255.0/28
+  ui: {}
+volumes:
+  postgres-data:
+  artifacts:

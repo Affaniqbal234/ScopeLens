@@ -165,8 +165,8 @@ class PublicLifecycleResult(DomainModel):
     address: str | None
     state: Literal["new", "changed", "unchanged", "resolved", "not_observed", "unknown"]
     coverage: Literal["comparable", "insufficient", "unusable", "not_assessed"]
-    baseline_health: Literal["ready", "unavailable"] | None
-    current_health: Literal["ready", "unavailable"] | None
+    baseline_health: Literal["ready", "unavailable"] | None = None
+    current_health: Literal["ready", "unavailable"] | None = None
     provenance_refs: tuple[str, ...]
     explanation: str
     limitation: str

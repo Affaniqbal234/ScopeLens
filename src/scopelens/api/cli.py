@@ -41,7 +41,8 @@ def run_api(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
             token=token,
             allowed_origins=tuple(args.cors_origin),
         )
-        uvicorn.run(app, host="127.0.0.1", port=args.port)
+        host = "0.0.0.0" if args.container_bind else "127.0.0.1"
+        uvicorn.run(app, host=host, port=args.port)
     except (
         ArtifactError,
         ConfigurationError,

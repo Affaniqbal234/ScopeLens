@@ -129,7 +129,7 @@ def test_openapi_exposes_bearer_auth_and_bounded_retest_fields() -> None:
     assert not {"path", "method", "flags", "template"} & set(fields)
 
 
-def test_api_cli_is_local_only_and_has_no_bind_option(
+def test_api_cli_requires_explicit_container_bind(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     with pytest.raises(SystemExit) as stopped:
@@ -138,6 +138,7 @@ def test_api_cli_is_local_only_and_has_no_bind_option(
     output = capsys.readouterr().out
     assert "--cors-origin" in output
     assert "--host" not in output
+    assert "--container-bind" in output
 
 
 def test_internal_errors_do_not_echo_exception_details() -> None:

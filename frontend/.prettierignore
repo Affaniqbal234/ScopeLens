@@ -1,3 +1,5 @@
 coverage
 dist
+dist-demo
+demo-data/public-snapshot.json
 node_modules

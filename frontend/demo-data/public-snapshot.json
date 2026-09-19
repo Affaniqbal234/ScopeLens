@@ -1,0 +1,89 @@
+{
+  "claims": [],
+  "contexts": [
+    {
+      "address": "192.0.2.1",
+      "kind": "http_origin",
+      "origin": "https://host-1.example.invalid"
+    },
+    {
+      "address": "192.0.2.1",
+      "kind": "http_origin",
+      "origin": "https://host-2.example.invalid"
+    }
+  ],
+  "coverage_note": "Each lifecycle state comes from the explicit baseline and current selections recorded in this snapshot.",
+  "display_name": "ScopeLens controlled demo",
+  "lifecycle": [
+    {
+      "address": "192.0.2.1",
+      "baseline_health": "ready",
+      "coverage": "unusable",
+      "current_health": "unavailable",
+      "explanation": "A failure, interruption, incompatible context, or evidence problem prevented a conclusion.",
+      "limitation": "The conclusion applies only to the recorded route and backend context.",
+      "origin": "https://host-1.example.invalid",
+      "provenance_refs": [
+        "baseline-assessment-57d85e9fc2858189",
+        "current-assessment-05b309b50f151aff"
+      ],
+      "resource": "/",
+      "rule_id": "scopelens.directory-listing",
+      "rule_version": "1",
+      "state": "unknown"
+    },
+    {
+      "address": "192.0.2.1",
+      "baseline_health": "ready",
+      "coverage": "not_assessed",
+      "explanation": "The later selection did not establish the condition again, but no usable comparable negative established absence.",
+      "limitation": "The conclusion does not establish repository compromise or secret exposure.",
+      "origin": "https://host-2.example.invalid",
+      "provenance_refs": [
+        "baseline-assessment-57d85e9fc2858189"
+      ],
+      "resource": "/.git/config",
+      "rule_id": "scopelens.git-config-exposure",
+      "rule_version": "1",
+      "state": "not_observed"
+    },
+    {
+      "address": "192.0.2.1",
+      "baseline_health": "ready",
+      "coverage": "comparable",
+      "current_health": "ready",
+      "explanation": "The previously supported condition was not supported by a later comparable recheck of the same recorded route and backend context.",
+      "limitation": "Resolution is limited to the recorded route, backend, and comparable recheck evidence. It does not prove an underlying code fix.",
+      "origin": "https://host-1.example.invalid",
+      "provenance_refs": [
+        "baseline-assessment-57d85e9fc2858189",
+        "current-assessment-05b309b50f151aff"
+      ],
+      "resource": "/",
+      "rule_id": "scopelens.hsts-header-missing",
+      "rule_version": "1",
+      "state": "resolved"
+    },
+    {
+      "address": "192.0.2.1",
+      "coverage": "not_assessed",
+      "current_health": "ready",
+      "explanation": "The adverse condition is supported in the current selection without comparable baseline support. The snapshot does not claim when it began.",
+      "limitation": "Header presence or absence does not assess policy strength, certificate validity, or browser behavior.",
+      "origin": "https://host-2.example.invalid",
+      "provenance_refs": [
+        "current-assessment-05b309b50f151aff"
+      ],
+      "resource": "/",
+      "rule_id": "scopelens.hsts-header-missing",
+      "rule_version": "1",
+      "state": "new"
+    }
+  ],
+  "recorded_data_notice": "Recorded and sanitized ScopeLens data; no live target activity occurs during export.",
+  "source_kind": "comparison",
+  "source_ref": "comparison-793f7e8a4d222949",
+  "source_report_version": "report-v1",
+  "stages": [],
+  "version": "public-snapshot-v1"
+}

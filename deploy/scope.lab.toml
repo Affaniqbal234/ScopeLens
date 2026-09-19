@@ -1,0 +1,25 @@
+[project]
+id = "controlled-lab"
+name = "Controlled local lab"
+
+[[project.scope.network_targets]]
+address = "172.31.255.2"
+ports = [8000]
+
+[[project.scope.web_targets]]
+origin = "http://lab-one.example.invalid:8000"
+approved_addresses = ["172.31.255.2"]
+
+[[project.scope.web_targets]]
+origin = "http://lab-two.example.invalid:8000"
+approved_addresses = ["172.31.255.2"]
+
+[[profiles]]
+id = "conservative"
+tcp_ports = [8000]
+max_targets = 3
+requests_per_second = 2
+request_timeout_seconds = 5
+scan_timeout_seconds = 30
+probes_per_second = 2
+max_artifact_bytes = 1048576

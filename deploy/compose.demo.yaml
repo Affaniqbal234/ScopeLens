@@ -1,0 +1,30 @@
+name: scopelens-demo
+
+services:
+  public-demo:
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile
+      target: public-demo
+    ports:
+      - 127.0.0.1:${SCOPELENS_DEMO_PORT:-8081}:8080
+    networks: [demo]
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 32
+    mem_limit: 128m
+    cpus: 0.5
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/demo.html', timeout=2).close()"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    logging:
+      driver: local
+      options: {max-size: 5m, max-file: "2", compress: "false"}
+
+networks:
+  demo: {}

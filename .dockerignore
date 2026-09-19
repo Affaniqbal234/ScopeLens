@@ -10,3 +10,8 @@
 dist
 build
 .env*
+backups
+frontend/coverage
+frontend/dist
+frontend/dist-demo
+frontend/node_modules

@@ -1,8 +1,13 @@
-FROM python:3.14-slim-bookworm AS target
+FROM python:3.14-slim-bookworm AS target-base
 WORKDIR /srv
-COPY lab/www/ /srv/
 USER 10001:10001
 CMD ["python", "-m", "http.server", "8000", "--bind", "0.0.0.0", "--directory", "/srv"]
+
+FROM target-base AS target
+COPY --chown=10001:10001 lab/www/ /srv/
+
+FROM target-base AS fixed-target
+COPY --chown=10001:10001 lab/fixed/ /srv/
 
 FROM python:3.14-slim-bookworm AS scanner
 RUN apt-get update && apt-get install -y --no-install-recommends nmap \

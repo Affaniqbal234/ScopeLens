@@ -39,6 +39,14 @@ jobs:
         run: uv run --locked pytest
       - name: Build distributions
         run: uv build
+      - name: Validate deployment configuration
+        if: runner.os == 'Linux'
+        env:
+          SCOPELENS_POSTGRES_PASSWORD: ci-only-compose-password
+          SCOPELENS_API_TOKEN: ci-only-compose-token-0123456789abcdef
+        run: |
+          docker compose config --quiet
+          docker compose -f deploy/compose.demo.yaml config --quiet
       - name: Verify controlled Docker lab
         if: runner.os == 'Linux'
         env:
@@ -53,3 +61,33 @@ jobs:
         run: |
           uv run --isolated --no-project --with ./dist/*.whl scopelens --version
           uv run --isolated --no-project --with ./dist/*.whl python -m scopelens --help
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install locked frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Check frontend formatting
+        working-directory: frontend
+        run: npm run format:check
+      - name: Test frontend
+        working-directory: frontend
+        run: npm test
+      - name: Build dashboard
+        working-directory: frontend
+        run: npm run build
+      - name: Build and inspect public demo
+        working-directory: frontend
+        run: |
+          npm run build:demo
+          npm run verify:demo

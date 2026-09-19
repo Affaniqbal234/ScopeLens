@@ -1,0 +1,4 @@
+services:
+  lab-target:
+    build:
+      target: fixed-target

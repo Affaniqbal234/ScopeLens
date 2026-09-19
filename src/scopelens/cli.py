@@ -113,6 +113,11 @@ def main(argv: list[str] | None = None) -> None:
 
     api.add_argument("--port", type=local_port, default=8000)
     api.add_argument("--cors-origin", action="append", default=[])
+    api.add_argument(
+        "--container-bind",
+        action="store_true",
+        help="listen on the container interface; keep the host port bound to loopback",
+    )
 
     add_commands(commands)
     add_report_commands(commands)
