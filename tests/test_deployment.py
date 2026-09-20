@@ -129,8 +129,9 @@ def test_bundled_demo_is_deterministic_sanitized_and_offline(
             ip_address(context.address) in network for network in documentation_networks
         )
         assert context.origin is not None
-        assert urlsplit(context.origin).hostname is not None
-        assert urlsplit(context.origin).hostname.endswith(".example.invalid")
+        hostname = urlsplit(context.origin).hostname
+        assert hostname is not None
+        assert hostname.endswith(".example.invalid")
     encoded = bundled.decode()
     for forbidden in (
         "Authorization",
