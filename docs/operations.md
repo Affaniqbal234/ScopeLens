@@ -2,8 +2,9 @@
 
 ScopeLens supports one Docker Compose deployment for local authorized work. The
 operational stack and the public demo are separate. The operational stack can run
-bounded checks against server-owned scope. The public demo contains recorded,
-sanitized data and no operational API.
+bounded checks against server-owned scope. The public demo contains deterministic
+synthetic example data processed through ScopeLens's assessment, comparison, and
+sanitization code. It has no operational API.
 
 ## Start the local stack
 
@@ -240,19 +241,21 @@ unreferenced. Digest mismatch remains corrupt evidence.
 
 ## Public demo
 
-The public demo is built from the M14 allowlisted snapshot pipeline:
+The public demo is built from deterministic synthetic acquisition fixtures. They
+are evaluated through the actual assessment and historical comparison code, then
+exported through the allowlisted snapshot pipeline. They are not an authentic
+capture from the integrated lab assessment.
 
 ```powershell
-uv run --locked python deploy/generate_demo_snapshot.py demo-snapshot.json
 cd frontend
 npm ci
 npm run build:demo
 npm run verify:demo
 ```
 
-The generator refuses to overwrite an existing file. The committed fixture at
-`frontend/demo-data/public-snapshot.json` is checked against the same deterministic
-projection in tests.
+The committed fixture at `frontend/demo-data/public-snapshot.json` is checked
+byte-for-byte against the deterministic snapshot projection in tests. The static
+build consumes that fixture directly.
 
 Preview the static demo without starting PostgreSQL or the operational API:
 

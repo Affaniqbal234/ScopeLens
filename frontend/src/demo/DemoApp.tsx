@@ -17,9 +17,12 @@ export default function DemoApp() {
   return (
     <main className="demo-shell">
       <header className="demo-header">
-        <p className="eyebrow">Recorded public snapshot</p>
+        <p className="eyebrow">Static public demo</p>
         <h1>{snapshot.display_name}</h1>
-        <p>{snapshot.recorded_data_notice}</p>
+        <p>
+          Deterministic synthetic acquisitions evaluated and sanitized by
+          ScopeLens. No live target or operational API is used.
+        </p>
       </header>
 
       <section aria-labelledby="coverage-heading" className="demo-panel">

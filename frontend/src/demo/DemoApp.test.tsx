@@ -1,9 +1,12 @@
 import { render, screen } from "@testing-library/react";
 import DemoApp from "./DemoApp";
 
-test("renders qualified recorded states without operational controls", () => {
+test("renders qualified synthetic states without operational controls", () => {
   render(<DemoApp />);
 
+  expect(
+    screen.getByText(/deterministic synthetic acquisitions/i),
+  ).toBeInTheDocument();
   expect(screen.getByText("Resolved in checked context")).toBeInTheDocument();
   expect(screen.getByText("Unknown")).toBeInTheDocument();
   expect(
