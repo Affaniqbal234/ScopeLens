@@ -28,6 +28,18 @@ from scopelens.storage.database import HistoryError, database, migrate
 from scopelens.storage.history import History
 from scopelens.storage.operations import import_history, scan_history
 
+_NON_BLOCKING_INTEGRITY_ISSUES = frozenset({"interrupted", "unreferenced"})
+
+
+def _integrity_failures(
+    issues: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    return [
+        issue
+        for issue in issues
+        if issue.get("issue") not in _NON_BLOCKING_INTEGRITY_ISSUES
+    ]
+
 
 def run_history(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     url = os.environ.get("SCOPELENS_DATABASE_URL")
@@ -100,8 +112,11 @@ def run_history(args: argparse.Namespace, parser: argparse.ArgumentParser) -> No
             print(json.dumps(history.list_runs(args.project), default=str, indent=2))
         elif args.command == "history-show":
             print(history.report(args.run_id).model_dump_json(indent=2))
-        elif args.command == "history-reconcile":
-            print(json.dumps(history.reconcile(), indent=2))
+        elif args.command in ("history-reconcile", "history-verify"):
+            issues = history.reconcile()
+            print(json.dumps(issues, indent=2))
+            if args.command == "history-verify" and _integrity_failures(issues):
+                parser.exit(1, "referenced evidence failed integrity verification\n")
     except (
         HistoryError,
         CorrelationError,
@@ -216,6 +231,10 @@ def add_commands(commands: argparse._SubParsersAction[argparse.ArgumentParser]) 
         (
             "history-reconcile",
             "check artifact health and mark abandoned runs interrupted",
+        ),
+        (
+            "history-verify",
+            "fail when referenced artifact integrity cannot be verified",
         ),
     ):
         command = commands.add_parser(name, help=help_text, allow_abbrev=False)

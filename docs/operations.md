@@ -216,9 +216,9 @@ try {
     Invoke-CheckedNative { docker compose -p $RestoreProject create api } "Could not create the stopped API container"
     Invoke-CheckedNative { docker compose -p $RestoreProject cp "$ArtifactsBackup/." api:/var/lib/scopelens/ } "Could not copy the artifact backup"
     Invoke-CheckedNative { docker compose -p $RestoreProject run --rm --no-deps --user 0 --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --entrypoint sh api -c 'chown -R 10001:10001 /var/lib/scopelens && find /var/lib/scopelens -type d -exec chmod 700 {} \; && find /var/lib/scopelens -type f -exec chmod 600 {} \;' } "Could not repair artifact ownership and permissions"
+    Invoke-CheckedNative { docker compose -p $RestoreProject run --rm --no-deps --entrypoint scopelens api history-verify --artifacts /var/lib/scopelens } "Evidence integrity verification failed"
+    Invoke-CheckedNative { docker compose -p $RestoreProject run --rm --no-deps --entrypoint scopelens api assessment-reconcile --artifacts /var/lib/scopelens } "Assessment reconciliation failed"
     Invoke-CheckedNative { docker compose -p $RestoreProject up -d --wait } "The restored stack did not become ready"
-    Invoke-CheckedNative { docker compose -p $RestoreProject exec -T api scopelens history-reconcile --artifacts /var/lib/scopelens } "History reconciliation failed"
-    Invoke-CheckedNative { docker compose -p $RestoreProject exec -T api scopelens assessment-reconcile --artifacts /var/lib/scopelens } "Assessment reconciliation failed"
 } catch {
     Write-Warning "Restore failed. Do not treat $RestoreProject as restored or start its API manually."
     throw
@@ -229,10 +229,14 @@ If restore fails after PostgreSQL starts, leave the disposable restore project f
 diagnosis or stop and remove that project's resources explicitly. Do not start its
 API manually and do not reuse its partial volumes for another restore attempt.
 
-History reconciliation reports missing, corrupt, and unreferenced files. It does
-not delete artifacts or rewrite completed evidence as valid. A database reference
-without its artifact remains an evidence-health problem. An artifact without a
-database reference remains unreferenced. Digest mismatch remains corrupt evidence.
+The one-off verifier uses the restored database and private artifact volume without
+starting the operational API. It emits the reconciliation result as JSON and exits
+with failure for missing, corrupt, busy, or unknown results. Unreferenced files are
+reported but do not block startup because they are not evidence referenced by the
+restored database. Reconciliation does not delete artifacts or rewrite completed
+evidence as valid. A database reference without its artifact remains an
+evidence-health problem. An artifact without a database reference remains
+unreferenced. Digest mismatch remains corrupt evidence.
 
 ## Public demo
 

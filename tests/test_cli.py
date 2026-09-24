@@ -1,13 +1,96 @@
+import json
 from importlib.metadata import version
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 import scopelens.cli as cli
+import scopelens.storage.cli as storage_cli
 from scopelens.adapters.base import ParsedReport
 from scopelens.cli import main
 from scopelens.execution.process import ExecutionError
+
+
+@pytest.mark.parametrize(
+    ("issue", "expected_exit"),
+    [
+        (None, None),
+        ("unreferenced", None),
+        ("interrupted", None),
+        ("missing", 1),
+        ("corrupt", 1),
+        ("busy", 1),
+        ("unexpected", 1),
+    ],
+)
+def test_history_verify_exit_reflects_referenced_evidence_integrity(
+    issue: str | None,
+    expected_exit: int | None,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = Mock()
+    issues = [] if issue is None else [{"issue": issue, "path": "evidence"}]
+
+    class FakeHistory:
+        def __init__(self, database: object, artifacts: object) -> None:
+            pass
+
+        def reconcile(self) -> list[dict[str, str]]:
+            return issues
+
+    monkeypatch.setenv("SCOPELENS_DATABASE_URL", "postgresql://local/test")
+    monkeypatch.setattr(storage_cli, "database", lambda _: engine)
+    monkeypatch.setattr(storage_cli, "ArtifactStore", lambda _: object())
+    monkeypatch.setattr(storage_cli, "History", FakeHistory)
+    arguments = ["history-verify", "--artifacts", str(tmp_path / "artifacts")]
+
+    if expected_exit is None:
+        main(arguments)
+    else:
+        with pytest.raises(SystemExit) as exc:
+            main(arguments)
+        assert exc.value.code == expected_exit
+
+    output = capsys.readouterr()
+    assert json.loads(output.out) == issues
+    if expected_exit is None:
+        assert output.err == ""
+    else:
+        assert output.err == "referenced evidence failed integrity verification\n"
+    engine.dispose.assert_called_once_with()
+
+
+def test_history_verify_failure_is_closed(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = Mock()
+
+    class UnreadableHistory:
+        def __init__(self, database: object, artifacts: object) -> None:
+            pass
+
+        def reconcile(self) -> list[dict[str, str]]:
+            raise OSError("private path")
+
+    monkeypatch.setenv("SCOPELENS_DATABASE_URL", "postgresql://local/test")
+    monkeypatch.setattr(storage_cli, "database", lambda _: engine)
+    monkeypatch.setattr(storage_cli, "ArtifactStore", lambda _: object())
+    monkeypatch.setattr(storage_cli, "History", UnreadableHistory)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["history-verify", "--artifacts", str(tmp_path / "artifacts")])
+
+    assert exc.value.code == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "artifact operation failed" in output.err
+    assert "private path" not in output.err
+    engine.dispose.assert_called_once_with()
 
 
 def test_no_arguments_shows_help(capsys: pytest.CaptureFixture[str]) -> None:

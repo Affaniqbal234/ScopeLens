@@ -219,8 +219,19 @@ def test_recovery_instructions_fail_closed() -> None:
     restore_database = restore.index("pg_restore --exit-on-error")
     copy_artifacts = restore.index('cp "$ArtifactsBackup/."')
     repair_permissions = restore.index("--cap-add CHOWN")
+    verify_history = restore.index("history-verify --artifacts")
+    reconcile_assessments = restore.index("assessment-reconcile --artifacts")
     start_stack = restore.index("docker compose -p $RestoreProject up -d --wait }")
-    assert restore_database < copy_artifacts < repair_permissions < start_stack
+    assert (
+        restore_database
+        < copy_artifacts
+        < repair_permissions
+        < verify_history
+        < reconcile_assessments
+        < start_stack
+    )
+    assert "run --rm --no-deps --entrypoint scopelens api history-verify" in restore
+    assert "history-reconcile --artifacts" not in restore
 
 
 def _free_port() -> int:
