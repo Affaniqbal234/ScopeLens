@@ -104,9 +104,22 @@ def test_bundled_demo_is_deterministic_sanitized_and_offline(
     monkeypatch.setattr(
         subprocess, "run", lambda *args, **kwargs: pytest.fail("process used")
     )
-    snapshot = build_public_snapshot(
-        recorded_demo_report(), display_name="ScopeLens controlled demo"
-    )
+    report = recorded_demo_report()
+    comparison = report.comparison
+    resolved = next(item for item in comparison.results if item.state == "resolved")
+    assert resolved.baseline is not None and resolved.baseline.evidence_used
+    assert resolved.current is not None and resolved.current.evidence_used
+    assert resolved.claim.rule_id == "scopelens.hsts-header-missing"
+    hsts_by_origin = {
+        item.claim.origin: item.state
+        for item in comparison.results
+        if item.claim.rule_id == "scopelens.hsts-header-missing"
+    }
+    assert hsts_by_origin == {
+        "https://lab-one.example.invalid": "resolved",
+        "https://lab-two.example.invalid": "new",
+    }
+    snapshot = build_public_snapshot(report, display_name="ScopeLens controlled demo")
     bundled = (ROOT / "frontend/demo-data/public-snapshot.json").read_bytes()
     assert bundled == render_json(snapshot)
     parsed = PublicSnapshot.model_validate_json(bundled)

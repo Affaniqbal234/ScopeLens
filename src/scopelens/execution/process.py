@@ -86,6 +86,24 @@ def write_private_artifact(
     return path
 
 
+def _process_group_has_live_members(process_group: int) -> bool:
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = (entry / "stat").read_text()
+            fields = raw[raw.rfind(")") + 2 :].split()
+            if (
+                len(fields) >= 3
+                and int(fields[2]) == process_group
+                and fields[0] != "Z"
+            ):
+                return True
+        except OSError, ValueError:
+            continue
+    return False
+
+
 async def _stop(process: asyncio.subprocess.Process) -> None:
     # Kill the session's process group even if the leader has already exited.
     try:
@@ -99,6 +117,8 @@ async def _stop(process: asyncio.subprocess.Process) -> None:
         except ProcessLookupError:
             pass
     await process.wait()
+    while _process_group_has_live_members(process.pid):
+        await asyncio.sleep(0.01)
 
 
 async def run_process(

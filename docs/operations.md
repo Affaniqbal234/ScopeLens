@@ -100,16 +100,20 @@ verifiable evidence.
 Stop operational writes before copying either side:
 
 ```powershell
+$BackupDir = Join-Path (Resolve-Path .) ("backups/scopelens-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
+New-Item -ItemType Directory $BackupDir | Out-Null
+New-Item -ItemType Directory (Join-Path $BackupDir "artifacts") | Out-Null
 docker compose stop api dashboard
-New-Item -ItemType Directory -Force backups | Out-Null
 docker compose exec -T postgres pg_dump -U scopelens -d scopelens -Fc -f /tmp/scopelens.dump
-docker compose cp postgres:/tmp/scopelens.dump ./backups/scopelens.dump
-docker compose cp api:/var/lib/scopelens/. ./backups/artifacts/
+docker compose cp postgres:/tmp/scopelens.dump (Join-Path $BackupDir "scopelens.dump")
+docker compose cp api:/var/lib/scopelens/. (Join-Path $BackupDir "artifacts")
 docker compose exec -T postgres rm /tmp/scopelens.dump
 ```
 
-Keep the database dump and artifact directory as one backup set. Record when the
-stack was stopped so the two copies are not mistaken for independent snapshots.
+The destination must be new and empty so files from older snapshots cannot be
+mixed into the backup. Keep the database dump and artifact directory as one set.
+Record when the stack was stopped so the two copies are not mistaken for
+independent snapshots.
 
 Restore into a new, empty Compose project or after deliberately removing the old
 volumes. Start PostgreSQL first, restore the database dump, create the API container,
@@ -117,25 +121,30 @@ then copy the matching artifacts into its volume. The copied artifact tree must 
 owned by UID/GID `10001:10001`; directories require mode `0700` and files require
 mode `0600`. Start the API only after both sides are in place.
 
-For a new empty Compose project, use the following sequence. `pg_restore --clean`
-replaces data in the selected database, so do not run it against a database you
-intend to keep.
+For a new empty Compose project, first stop the source stack with `docker compose
+down` without `--volumes`. This preserves its data while removing the fixed lab
+network, which cannot coexist with a second copy. Use a distinct project name for
+every restore command. `pg_restore --clean` replaces data in the selected database,
+so do not run it against a database you intend to keep.
 
 ```powershell
-docker compose up -d --wait postgres
-docker compose cp ./backups/scopelens.dump postgres:/tmp/scopelens.dump
-docker compose exec -T postgres pg_restore --exit-on-error --clean --if-exists -U scopelens -d scopelens /tmp/scopelens.dump
-docker compose create api
-docker compose cp ./backups/artifacts/. api:/var/lib/scopelens/
-docker compose run --rm --no-deps --user 0 --entrypoint sh api -c 'chown -R 10001:10001 /var/lib/scopelens && find /var/lib/scopelens -type d -exec chmod 700 {} \; && find /var/lib/scopelens -type f -exec chmod 600 {} \;'
-docker compose up -d --wait
+$RestoreProject = "scopelens-restore"
+docker compose down
+docker compose -p $RestoreProject build api dashboard lab-target
+docker compose -p $RestoreProject up -d --wait postgres
+docker compose -p $RestoreProject cp (Join-Path $BackupDir "scopelens.dump") postgres:/tmp/scopelens.dump
+docker compose -p $RestoreProject exec -T postgres pg_restore --exit-on-error --clean --if-exists -U scopelens -d scopelens /tmp/scopelens.dump
+docker compose -p $RestoreProject create api
+docker compose -p $RestoreProject cp (Join-Path $BackupDir "artifacts/.") api:/var/lib/scopelens/
+docker compose -p $RestoreProject run --rm --no-deps --user 0 --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --entrypoint sh api -c 'chown -R 10001:10001 /var/lib/scopelens && find /var/lib/scopelens -type d -exec chmod 700 {} \; && find /var/lib/scopelens -type f -exec chmod 600 {} \;'
+docker compose -p $RestoreProject up -d --wait
 ```
 
 After restore, run both reconciliation commands:
 
 ```powershell
-docker compose exec api scopelens history-reconcile --artifacts /var/lib/scopelens
-docker compose exec api scopelens assessment-reconcile --artifacts /var/lib/scopelens
+docker compose -p $RestoreProject exec api scopelens history-reconcile --artifacts /var/lib/scopelens
+docker compose -p $RestoreProject exec api scopelens assessment-reconcile --artifacts /var/lib/scopelens
 ```
 
 History reconciliation reports missing, corrupt, and unreferenced files. It does

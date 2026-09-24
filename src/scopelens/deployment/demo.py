@@ -1,118 +1,167 @@
 from datetime import UTC, datetime, timedelta
-from typing import Literal, cast
+from hashlib import sha256
+from uuid import UUID
 
-from scopelens.assessment.models import Outcome
-from scopelens.assessment.rules import DIRECTORY_RULE, GIT_CONFIG_RULE, HSTS_RULE
-from scopelens.comparison.models import (
-    AssessmentReference,
-    ClaimKey,
-    ComparisonSelection,
-    CoverageDecision,
-    CoverageStatus,
-    HistoricalComparison,
-    HistoricalComparisonReport,
-    HistoricalState,
-    comparison_id,
+from scopelens.assessment.models import (
+    AcquisitionEvidence,
+    AcquisitionStatus,
+    CapturedResponse,
+    RecheckAcquisition,
+    RecheckReport,
 )
+from scopelens.assessment.rules import (
+    DIRECTORY_RULE,
+    GIT_CONFIG_RULE,
+    CapturedExchange,
+    assess_exposure_recheck,
+    assess_hsts_recheck,
+)
+from scopelens.comparison.compare import ArtifactHealth, compare_assessments
 from scopelens.reporting.models import ComparisonReport
 from scopelens.reporting.projection import build_comparison_report
 
 RECORDED_AT = datetime(2026, 1, 15, 12, tzinfo=UTC)
 PROJECT_ID = "controlled-demo"
 ADDRESS = "192.0.2.44"
+ORIGIN_ONE = "https://lab-one.example.invalid"
+ORIGIN_TWO = "https://lab-two.example.invalid"
 
 
-def _reference(
-    outcome: Outcome,
-    identity: str,
-    *,
-    health: Literal["ready", "unavailable"] = "ready",
-    started_at: datetime = RECORDED_AT,
-) -> AssessmentReference:
-    return AssessmentReference(
-        assessment_id=f"assessment-v1:{identity * 64}",
-        rule_version="1",
-        outcome=outcome,
-        reason="recorded_controlled_fixture",
-        evidence_health=health,
-        observed_at=(started_at,),
-        acquisition_started_at=started_at,
-        acquisition_finished_at=started_at + timedelta(seconds=1),
-        evidence_used=(),
-    )
-
-
-def _lifecycle(
-    rule_id: str,
+def _exchange(
+    number: int,
     origin: str,
-    state: HistoricalState,
-) -> HistoricalComparison:
-    resource = "/.git/config" if rule_id == GIT_CONFIG_RULE else "/"
-    claim = ClaimKey(rule_id=rule_id, origin=origin, resource=resource, address=ADDRESS)
-    baseline = _reference("supported_positive", "b")
-    current = {
-        "resolved": _reference(
-            "supported_negative", "c", started_at=RECORDED_AT + timedelta(hours=1)
-        ),
-        "unchanged": _reference(
-            "supported_positive", "c", started_at=RECORDED_AT + timedelta(hours=1)
-        ),
-        "new": _reference(
-            "supported_positive", "c", started_at=RECORDED_AT + timedelta(hours=1)
-        ),
-        "unknown": _reference(
-            "inconclusive",
-            "c",
-            health="unavailable",
-            started_at=RECORDED_AT + timedelta(hours=1),
-        ),
-        "not_observed": None,
-    }[state]
-    coverage = cast(
-        CoverageStatus,
-        {
-            "resolved": "comparable",
-            "unchanged": "comparable",
-            "new": "not_assessed",
-            "unknown": "unusable",
-            "not_observed": "not_assessed",
-        }[state],
+    resource: str,
+    *,
+    started_at: datetime,
+    body: bytes = b"",
+    hsts_present: bool = False,
+    status: AcquisitionStatus = "complete",
+) -> CapturedExchange:
+    response = None
+    evidence = None
+    if status == "complete":
+        response = CapturedResponse(
+            status_code=200,
+            headers_complete=True,
+            body_complete=True,
+            body_sha256=sha256(body).hexdigest(),
+            strict_transport_security_present=hsts_present,
+            access_challenge_present=False,
+            content_encoding_identity=True,
+        )
+        evidence = AcquisitionEvidence(
+            artifact_path=f"recorded/{number}/response.http",
+            artifact_sha256=sha256(f"recorded-response-{number}".encode()).hexdigest(),
+            size_bytes=len(body),
+        )
+    acquisition = RecheckAcquisition(
+        id=UUID(int=number),
+        started_at=started_at,
+        finished_at=started_at + timedelta(seconds=1),
+        origin=origin,
+        approved_address=ADDRESS,
+        resource=resource,
+        status=status,
+        evidence=evidence,
+        response=response,
     )
-    return HistoricalComparison(
-        id=comparison_id(PROJECT_ID, claim),
-        claim=claim,
-        state=state,
-        reason=f"recorded_{state}",
-        explanation="Recorded controlled-lab comparison.",
-        coverage=CoverageDecision(
-            status=coverage,
-            reason=f"recorded_{coverage}",
-            explanation="Coverage is limited to the recorded route and backend.",
-        ),
-        baseline=None if state == "new" else baseline,
-        current=current,
-        limitations=("Recorded demo evidence only.",),
+    return CapturedExchange(acquisition, body)
+
+
+def _reports() -> tuple[RecheckReport, RecheckReport]:
+    baseline_hsts_one = _exchange(
+        1, ORIGIN_ONE, "/", started_at=RECORDED_AT, hsts_present=False
     )
+    baseline_directory = _exchange(
+        2,
+        ORIGIN_ONE,
+        "/",
+        started_at=RECORDED_AT + timedelta(seconds=2),
+        body=b"<title>Directory listing for /</title><a href='entry'>entry</a>",
+    )
+    baseline_git = _exchange(
+        3,
+        ORIGIN_TWO,
+        "/.git/config",
+        started_at=RECORDED_AT + timedelta(seconds=4),
+        body=b"[core]\nrepositoryformatversion = 0\n",
+    )
+    baseline_hsts_two = _exchange(
+        4,
+        ORIGIN_TWO,
+        "/",
+        started_at=RECORDED_AT + timedelta(seconds=6),
+        hsts_present=True,
+    )
+    baseline = RecheckReport(
+        project_id=PROJECT_ID,
+        acquisitions=tuple(
+            item.acquisition
+            for item in (
+                baseline_hsts_one,
+                baseline_directory,
+                baseline_git,
+                baseline_hsts_two,
+            )
+        ),
+        assessments=(
+            assess_hsts_recheck(PROJECT_ID, baseline_hsts_one),
+            assess_exposure_recheck(PROJECT_ID, DIRECTORY_RULE, baseline_directory),
+            assess_exposure_recheck(PROJECT_ID, GIT_CONFIG_RULE, baseline_git),
+            assess_hsts_recheck(PROJECT_ID, baseline_hsts_two),
+        ),
+    )
+
+    current_hsts_one = _exchange(
+        5,
+        ORIGIN_ONE,
+        "/",
+        started_at=RECORDED_AT + timedelta(hours=1),
+        hsts_present=True,
+    )
+    current_directory = _exchange(
+        6,
+        ORIGIN_ONE,
+        "/",
+        started_at=RECORDED_AT + timedelta(hours=1, seconds=2),
+        status="timeout",
+    )
+    current_hsts_two = _exchange(
+        7,
+        ORIGIN_TWO,
+        "/",
+        started_at=RECORDED_AT + timedelta(hours=1, seconds=4),
+        hsts_present=False,
+    )
+    current = RecheckReport(
+        project_id=PROJECT_ID,
+        acquisitions=tuple(
+            item.acquisition
+            for item in (current_hsts_one, current_directory, current_hsts_two)
+        ),
+        assessments=(
+            assess_hsts_recheck(PROJECT_ID, current_hsts_one),
+            assess_exposure_recheck(PROJECT_ID, DIRECTORY_RULE, current_directory),
+            assess_hsts_recheck(PROJECT_ID, current_hsts_two),
+        ),
+    )
+    return baseline, current
+
+
+def _health(report: RecheckReport) -> dict[UUID, ArtifactHealth]:
+    return {
+        acquisition.id: "ready"
+        for acquisition in report.acquisitions
+        if acquisition.evidence is not None
+    }
 
 
 def recorded_demo_report() -> ComparisonReport:
-    comparison = HistoricalComparisonReport(
-        project_id=PROJECT_ID,
-        baseline=ComparisonSelection(
-            basis="fresh_recheck", identifiers=("recorded-baseline",)
-        ),
-        current=ComparisonSelection(
-            basis="fresh_recheck", identifiers=("recorded-current",)
-        ),
-        results=(
-            _lifecycle(HSTS_RULE, "https://lab-one.example.invalid", "resolved"),
-            _lifecycle(DIRECTORY_RULE, "https://lab-one.example.invalid", "unknown"),
-            _lifecycle(
-                GIT_CONFIG_RULE,
-                "https://lab-two.example.invalid",
-                "not_observed",
-            ),
-            _lifecycle(HSTS_RULE, "https://lab-two.example.invalid", "new"),
-        ),
+    baseline, current = _reports()
+    comparison = compare_assessments(
+        baseline,
+        current,
+        baseline_acquisition_health=_health(baseline),
+        current_acquisition_health=_health(current),
     )
     return build_comparison_report(PROJECT_ID, "Recorded controlled lab", comparison)
