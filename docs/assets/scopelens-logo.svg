@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">ScopeLens logo</title>
+  <desc id="desc">A focused lens containing linked evidence points.</desc>
+  <rect width="128" height="128" rx="26" fill="#101c2a"/>
+  <path d="M24 38V26h12M92 26h12v12M24 90v12h12" fill="none" stroke="#7dd3c7" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="58" cy="56" r="29" fill="#16293b" stroke="#7dd3c7" stroke-width="6"/>
+  <path d="M79 77l24 24" fill="none" stroke="#f0b44d" stroke-width="8" stroke-linecap="round"/>
+  <path d="M42 62l13-15 14 10" fill="none" stroke="#e7f4f2" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="42" cy="62" r="5" fill="#f0b44d"/>
+  <circle cx="55" cy="47" r="5" fill="#7dd3c7"/>
+  <circle cx="69" cy="57" r="5" fill="#e7f4f2"/>
+</svg>

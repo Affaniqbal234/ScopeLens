@@ -1,7 +1,18 @@
-# ScopeLens
+<p align="center">
+  <img src="docs/assets/scopelens-logo.svg" width="96" alt="ScopeLens logo">
+</p>
 
-[![CI](https://github.com/Affaniqbal234/ScopeLens/actions/workflows/ci.yml/badge.svg)](https://github.com/Affaniqbal234/ScopeLens/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+<h1 align="center">ScopeLens</h1>
+
+<p align="center"><strong>Evidence-led assessment and reassessment for explicitly authorized services.</strong></p>
+
+<p align="center">
+  <a href="https://github.com/Affaniqbal234/ScopeLens/actions/workflows/ci.yml"><img src="https://github.com/Affaniqbal234/ScopeLens/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT License"></a>
+  <img src="https://img.shields.io/badge/Python-3.14-3776AB?logo=python&amp;logoColor=white" alt="Python 3.14">
+  <img src="https://img.shields.io/badge/API-FastAPI%20%2B%20PostgreSQL-009688?logo=fastapi&amp;logoColor=white" alt="FastAPI and PostgreSQL">
+  <img src="https://img.shields.io/badge/UI-React%20%2B%20TypeScript-3178C6?logo=react&amp;logoColor=white" alt="React and TypeScript">
+</p>
 
 ScopeLens is a local platform for evidence-led assessment and reassessment of
 services you are explicitly authorized to test. It runs bounded Nmap,
@@ -14,12 +25,12 @@ previously supported conditions are absent under a comparable recheck, which wer
 merely not seen again, and which remain unknown because coverage or evidence was
 insufficient?
 
-![ScopeLens static demo showing coverage-aware historical comparison](docs/assets/scopelens-public-demo.png)
+![ScopeLens operational dashboard showing a completed controlled-lab assessment and persisted recheck evidence](docs/assets/scopelens-dashboard.png)
 
-_This is a genuine capture of the repository's static public demo. It uses
-deterministic synthetic acquisitions evaluated by ScopeLens's assessment and
-comparison code, then exported through the sanitized public snapshot pipeline. It
-does not show a live target or an operational scanner session._
+_The authenticated operational dashboard showing a completed assessment against
+the bundled controlled lab. The view exposes the immutable plan, exact authorized
+origin and address, stage outcome, and persisted evidence health without including
+the API token or raw artifact content._
 
 ## What ScopeLens does
 
@@ -66,7 +77,8 @@ the claim.
 
 ## Run the local application
 
-The supported V1 deployment uses Docker Desktop with WSL2 or Docker Engine with
+Run these commands from the repository root. The supported V1 deployment requires
+Git and either Docker Desktop with WSL2 and Linux containers or Docker Engine with
 Compose. It starts PostgreSQL, the loopback-bound authenticated API, the dashboard,
 private artifact storage, and the isolated controlled lab.
 
@@ -80,8 +92,18 @@ docker compose up -d --wait
 
 Open `http://127.0.0.1:8080` and enter the API token from `.env`. The dashboard
 keeps the token in memory for the current tab. The bundled configuration authorizes
-only the controlled Docker lab. Creating an assessment does not execute it, and a
-restart does not run pending work or retry interrupted work.
+only the controlled Docker lab.
+
+For a first assessment:
+
+1. Open **Authorized scope** and review the configured lab origins, address, ports,
+   and conservative profile.
+2. Return to **Assessments**, choose the permitted stages, and select **Create only**.
+3. Inspect the stored stage order and planned targets before selecting
+   **Run pending assessment**.
+4. Review each stage outcome and its evidence or limitations. Creating an
+   assessment does not execute it, and a restart does not run pending work or retry
+   interrupted work.
 
 Use the [local operations and recovery guide](docs/operations.md) for the complete
 vulnerable-to-fixed lab workflow, interruption handling, and paired PostgreSQL and
@@ -93,6 +115,12 @@ The public demo is a separate static build. Its committed snapshot comes from
 deterministic synthetic acquisition fixtures evaluated through the real assessment
 and historical comparison logic, then reduced by the `public-snapshot-v1`
 allowlist. It is not an authentic capture from the integrated V1 lab assessment.
+
+![ScopeLens static demo showing coverage-aware historical comparison](docs/assets/scopelens-public-demo.png)
+
+_A genuine capture of the static public demo. Its displayed data is synthetic and
+sanitized; it is separate from the authenticated operational dashboard shown
+above._
 
 The demo has no operational API client, API token, database, worker action, scanner
 binary, private artifact volume, or scanning control.
