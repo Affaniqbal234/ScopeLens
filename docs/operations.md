@@ -100,20 +100,61 @@ verifiable evidence.
 Stop operational writes before copying either side:
 
 ```powershell
-$BackupDir = Join-Path (Resolve-Path .) ("backups/scopelens-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
-New-Item -ItemType Directory $BackupDir | Out-Null
-New-Item -ItemType Directory (Join-Path $BackupDir "artifacts") | Out-Null
-docker compose stop api dashboard
-docker compose exec -T postgres pg_dump -U scopelens -d scopelens -Fc -f /tmp/scopelens.dump
-docker compose cp postgres:/tmp/scopelens.dump (Join-Path $BackupDir "scopelens.dump")
-docker compose cp api:/var/lib/scopelens/. (Join-Path $BackupDir "artifacts")
-docker compose exec -T postgres rm /tmp/scopelens.dump
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+
+function Invoke-CheckedNative {
+    param([scriptblock]$Command, [string]$FailureMessage)
+    & $Command
+    $ExitCode = $LASTEXITCODE
+    if ($ExitCode -ne 0) {
+        throw "$FailureMessage (exit code $ExitCode)."
+    }
+}
+
+$BackupRoot = Join-Path (Resolve-Path .) "backups"
+New-Item -ItemType Directory -Path $BackupRoot -Force -ErrorAction Stop | Out-Null
+if (-not (Test-Path -LiteralPath $BackupRoot -PathType Container)) {
+    throw "Backup root is not a directory: $BackupRoot"
+}
+$BackupDir = Join-Path $BackupRoot ("scopelens-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
+if (Test-Path -LiteralPath $BackupDir) {
+    throw "Backup destination already exists: $BackupDir"
+}
+New-Item -ItemType Directory -Path $BackupDir -ErrorAction Stop | Out-Null
+$ArtifactsBackup = Join-Path $BackupDir "artifacts"
+New-Item -ItemType Directory -Path $ArtifactsBackup -ErrorAction Stop | Out-Null
+$DumpBackup = Join-Path $BackupDir "scopelens.dump"
+$CompleteMarker = Join-Path $BackupDir "BACKUP_COMPLETE"
+
+try {
+    Invoke-CheckedNative { docker compose stop api dashboard } "Could not quiesce ScopeLens"
+    Invoke-CheckedNative { docker compose exec -T postgres pg_dump -U scopelens -d scopelens -Fc -f /tmp/scopelens.dump } "PostgreSQL backup failed"
+    Invoke-CheckedNative { docker compose cp postgres:/tmp/scopelens.dump $DumpBackup } "Could not copy the PostgreSQL backup"
+    Invoke-CheckedNative { docker compose cp api:/var/lib/scopelens/. $ArtifactsBackup } "Could not copy the artifact backup"
+    Invoke-CheckedNative { docker compose exec -T postgres rm /tmp/scopelens.dump } "Could not remove the temporary database dump"
+
+    if (-not (Test-Path -LiteralPath $DumpBackup -PathType Leaf) -or (Get-Item -LiteralPath $DumpBackup).Length -eq 0) {
+        throw "The PostgreSQL backup is missing or empty."
+    }
+    if (-not (Test-Path -LiteralPath $ArtifactsBackup -PathType Container)) {
+        throw "The artifact backup is missing."
+    }
+
+    $MarkerTemp = Join-Path $BackupDir ".BACKUP_COMPLETE.tmp"
+    [IO.File]::WriteAllText($MarkerTemp, "scopelens-paired-backup-v1")
+    Move-Item -LiteralPath $MarkerTemp -Destination $CompleteMarker -ErrorAction Stop
+} catch {
+    Write-Warning "Backup incomplete. Do not restore from $BackupDir because BACKUP_COMPLETE was not created."
+    throw
+}
 ```
 
 The destination must be new and empty so files from older snapshots cannot be
 mixed into the backup. Keep the database dump and artifact directory as one set.
-Record when the stack was stopped so the two copies are not mistaken for
-independent snapshots.
+Only a set with the exact `BACKUP_COMPLETE` marker is restorable. A failed attempt
+is left unmarked for diagnosis or deliberate removal. Record when the stack was
+stopped so the two copies are not mistaken for independent snapshots.
 
 Restore into a new, empty Compose project or after deliberately removing the old
 volumes. Start PostgreSQL first, restore the database dump, create the API container,
@@ -128,24 +169,65 @@ every restore command. `pg_restore --clean` replaces data in the selected databa
 so do not run it against a database you intend to keep.
 
 ```powershell
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+
+function Invoke-CheckedNative {
+    param([scriptblock]$Command, [string]$FailureMessage)
+    & $Command
+    $ExitCode = $LASTEXITCODE
+    if ($ExitCode -ne 0) {
+        throw "$FailureMessage (exit code $ExitCode)."
+    }
+}
+
+$BackupDir = (Resolve-Path -LiteralPath "backups/scopelens-YYYYMMDD-HHMMSS" -ErrorAction Stop).Path
+$DumpBackup = Join-Path $BackupDir "scopelens.dump"
+$ArtifactsBackup = Join-Path $BackupDir "artifacts"
+$CompleteMarker = Join-Path $BackupDir "BACKUP_COMPLETE"
+if (-not (Test-Path -LiteralPath $DumpBackup -PathType Leaf) -or (Get-Item -LiteralPath $DumpBackup).Length -eq 0) {
+    throw "The PostgreSQL backup is missing or empty."
+}
+if (-not (Test-Path -LiteralPath $ArtifactsBackup -PathType Container)) {
+    throw "The artifact backup is missing."
+}
+if (-not (Test-Path -LiteralPath $CompleteMarker -PathType Leaf) -or (Get-Content -LiteralPath $CompleteMarker -Raw -ErrorAction Stop) -ne "scopelens-paired-backup-v1") {
+    throw "The paired backup is incomplete or has an invalid completion marker."
+}
+
 $RestoreProject = "scopelens-restore"
-docker compose down
-docker compose -p $RestoreProject build api dashboard lab-target
-docker compose -p $RestoreProject up -d --wait postgres
-docker compose -p $RestoreProject cp (Join-Path $BackupDir "scopelens.dump") postgres:/tmp/scopelens.dump
-docker compose -p $RestoreProject exec -T postgres pg_restore --exit-on-error --clean --if-exists -U scopelens -d scopelens /tmp/scopelens.dump
-docker compose -p $RestoreProject create api
-docker compose -p $RestoreProject cp (Join-Path $BackupDir "artifacts/.") api:/var/lib/scopelens/
-docker compose -p $RestoreProject run --rm --no-deps --user 0 --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --entrypoint sh api -c 'chown -R 10001:10001 /var/lib/scopelens && find /var/lib/scopelens -type d -exec chmod 700 {} \; && find /var/lib/scopelens -type f -exec chmod 600 {} \;'
-docker compose -p $RestoreProject up -d --wait
+$SourceConfigJson = Invoke-CheckedNative { docker compose config --format json } "Could not inspect the source Compose project"
+$SourceProject = ($SourceConfigJson | ConvertFrom-Json -ErrorAction Stop).name
+if ($RestoreProject -eq $SourceProject) {
+    throw "Use a restore project that is distinct from the source project."
+}
+$ExistingContainers = @(Invoke-CheckedNative { docker ps --all --quiet --filter "label=com.docker.compose.project=$RestoreProject" } "Could not inspect restore containers")
+$ExistingVolumes = @(Invoke-CheckedNative { docker volume ls --quiet --filter "label=com.docker.compose.project=$RestoreProject" } "Could not inspect restore volumes")
+if ($ExistingContainers.Count -ne 0 -or $ExistingVolumes.Count -ne 0) {
+    throw "Restore project $RestoreProject already has containers or volumes. Use a new empty project."
+}
+
+try {
+    Invoke-CheckedNative { docker compose down } "Could not stop the source stack"
+    Invoke-CheckedNative { docker compose -p $RestoreProject build api dashboard lab-target } "Could not build the restore services"
+    Invoke-CheckedNative { docker compose -p $RestoreProject up -d --wait postgres } "Restore PostgreSQL did not become ready"
+    Invoke-CheckedNative { docker compose -p $RestoreProject cp $DumpBackup postgres:/tmp/scopelens.dump } "Could not copy the database backup into PostgreSQL"
+    Invoke-CheckedNative { docker compose -p $RestoreProject exec -T postgres pg_restore --exit-on-error --clean --if-exists -U scopelens -d scopelens /tmp/scopelens.dump } "PostgreSQL restore failed"
+    Invoke-CheckedNative { docker compose -p $RestoreProject create api } "Could not create the stopped API container"
+    Invoke-CheckedNative { docker compose -p $RestoreProject cp "$ArtifactsBackup/." api:/var/lib/scopelens/ } "Could not copy the artifact backup"
+    Invoke-CheckedNative { docker compose -p $RestoreProject run --rm --no-deps --user 0 --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --entrypoint sh api -c 'chown -R 10001:10001 /var/lib/scopelens && find /var/lib/scopelens -type d -exec chmod 700 {} \; && find /var/lib/scopelens -type f -exec chmod 600 {} \;' } "Could not repair artifact ownership and permissions"
+    Invoke-CheckedNative { docker compose -p $RestoreProject up -d --wait } "The restored stack did not become ready"
+    Invoke-CheckedNative { docker compose -p $RestoreProject exec -T api scopelens history-reconcile --artifacts /var/lib/scopelens } "History reconciliation failed"
+    Invoke-CheckedNative { docker compose -p $RestoreProject exec -T api scopelens assessment-reconcile --artifacts /var/lib/scopelens } "Assessment reconciliation failed"
+} catch {
+    Write-Warning "Restore failed. Do not treat $RestoreProject as restored or start its API manually."
+    throw
+}
 ```
 
-After restore, run both reconciliation commands:
-
-```powershell
-docker compose -p $RestoreProject exec api scopelens history-reconcile --artifacts /var/lib/scopelens
-docker compose -p $RestoreProject exec api scopelens assessment-reconcile --artifacts /var/lib/scopelens
-```
+If restore fails after PostgreSQL starts, leave the disposable restore project for
+diagnosis or stop and remove that project's resources explicitly. Do not start its
+API manually and do not reuse its partial volumes for another restore attempt.
 
 History reconciliation reports missing, corrupt, and unreferenced files. It does
 not delete artifacts or rewrite completed evidence as valid. A database reference

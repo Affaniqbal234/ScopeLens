@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -177,6 +178,49 @@ def test_public_demo_source_has_no_operational_api_path() -> None:
         assert forbidden not in sources
     assert "<button" not in sources
     assert "<input" not in sources
+
+
+def test_recovery_instructions_fail_closed() -> None:
+    operations = (ROOT / "docs/operations.md").read_text(encoding="utf-8")
+    blocks = re.findall(r"```powershell\n(.*?)```", operations, flags=re.DOTALL)
+    backup = next(block for block in blocks if "pg_dump" in block)
+    restore = next(block for block in blocks if "pg_restore" in block)
+
+    for block in (backup, restore):
+        docker_lines = [
+            line.strip() for line in block.splitlines() if "docker " in line
+        ]
+        assert docker_lines
+        assert all("Invoke-CheckedNative { docker " in line for line in docker_lines)
+        assert '$ErrorActionPreference = "Stop"' in block
+        assert "$LASTEXITCODE" in block
+
+    assert "Backup destination already exists" in backup
+    assert "Backup root is not a directory" in backup
+    assert backup.index("Test-Path -LiteralPath $BackupRoot") < backup.index(
+        "$BackupDir = Join-Path $BackupRoot"
+    )
+    assert backup.index("Test-Path -LiteralPath $BackupDir") < backup.index(
+        "New-Item -ItemType Directory -Path $BackupDir"
+    )
+    assert backup.index("docker compose cp api:") < backup.index(
+        "[IO.File]::WriteAllText"
+    )
+    assert '"scopelens-paired-backup-v1"' in backup
+
+    stop_source = restore.index("docker compose down")
+    assert restore.index("$DumpBackup") < stop_source
+    assert restore.index("$ArtifactsBackup") < stop_source
+    assert restore.index("$CompleteMarker") < stop_source
+    assert restore.index("$ExistingContainers") < stop_source
+    assert restore.index("$ExistingVolumes") < stop_source
+    assert "$SourceProject" in restore
+
+    restore_database = restore.index("pg_restore --exit-on-error")
+    copy_artifacts = restore.index('cp "$ArtifactsBackup/."')
+    repair_permissions = restore.index("--cap-add CHOWN")
+    start_stack = restore.index("docker compose -p $RestoreProject up -d --wait }")
+    assert restore_database < copy_artifacts < repair_permissions < start_stack
 
 
 def _free_port() -> int:
